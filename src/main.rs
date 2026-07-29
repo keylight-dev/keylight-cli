@@ -61,6 +61,11 @@ enum Command {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    /// Manage apps and their license key types.
+    Products {
+        #[command(subcommand)]
+        command: commands::products::ProductsCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -104,6 +109,7 @@ fn main() {
             }
             AuthCommand::Status => commands::auth::status(&ctx, &deps),
         },
+        Command::Products { command } => commands::products::run(&ctx, &deps, command),
     };
 
     if let Err(e) = result {

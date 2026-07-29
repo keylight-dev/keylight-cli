@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod login;
 pub mod logout;
+pub mod products;
 
 use crate::api::ApiClient;
 use crate::config;
@@ -140,6 +141,87 @@ pub fn run_gated_raw(
     run_confirmable_raw(client, method, path, body, &confirm_opts(ctx, deps))
 }
 
+/// Append the query parameters that were actually supplied.
+///
+/// Values are percent-encoded: a pagination cursor is opaque server state and
+/// routinely contains `=`, `+` or `/`, any of which would be misread as
+/// structure if pasted in raw.
+pub fn query_path(base: &str, params: &[(&str, Option<String>)]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for (k, v) in params {
+        if let Some(v) = v {
+            parts.push(format!("{k}={}", percent_encode(v)));
+        }
+    }
+    if parts.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", parts.join("&"))
+    }
+}
+
+/// Percent-encode everything outside the unreserved set (RFC 3986 §2.3).
+/// Small enough not to justify a dependency, and conservative enough that
+/// over-encoding is never wrong.
+pub fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Resolve a mutually exclusive on/off flag pair into a bool.
+///
+/// Neither flag is an error rather than a default. For an operation that
+/// writes a boolean to a live app, guessing which way the user meant is the
+/// one behavior with no safe answer.
+pub fn require_toggle(on: bool, off: bool, on_flag: &str, off_flag: &str) -> Result<bool> {
+    match (on, off) {
+        (true, false) => Ok(true),
+        (false, true) => Ok(false),
+        (false, false) => Err(crate::error::CliError::Config(format!(
+            "pass {on_flag} or {off_flag}"
+        ))),
+        (true, true) => Err(crate::error::CliError::Config(format!(
+            "{on_flag} and {off_flag} are mutually exclusive"
+        ))),
+    }
+}
+
+/// Read a secret from the environment.
+///
+/// Secrets never arrive as flags — argv lands in shell history and is visible
+/// to other users via `ps`. The flag names the *variable*, so the value stays
+/// out of the command line while every input remains available
+/// non-interactively (no command may require a prompt).
+pub fn secret_from_env(var: &str) -> Result<String> {
+    match std::env::var(var) {
+        Ok(v) if !v.is_empty() => Ok(v),
+        _ => Err(crate::error::CliError::Config(format!(
+            "set {var} to the secret value (it is read from the environment, \
+             never from a flag, so it stays out of shell history)"
+        ))),
+    }
+}
+
+/// Parse a flag whose value is a JSON document, reporting which flag failed.
+/// `serde_json`'s own message alone ("expected value at line 1 column 1")
+/// doesn't say which of several JSON-valued flags was malformed.
+pub fn parse_json_flag(raw: Option<String>, flag: &str) -> Result<Option<serde_json::Value>> {
+    match raw {
+        None => Ok(None),
+        Some(s) => serde_json::from_str(&s)
+            .map(Some)
+            .map_err(|e| crate::error::CliError::Config(format!("{flag} is not valid JSON: {e}"))),
+    }
+}
+
 /// Build a JSON object from only the fields that were actually supplied.
 ///
 /// `PATCH` endpoints treat a present key as "set it" — sending `null` for an
@@ -155,9 +237,140 @@ pub fn json_body(fields: Vec<(&str, Option<serde_json::Value>)>) -> serde_json::
     serde_json::Value::Object(map)
 }
 
+/// Shared scaffolding for command tests: a `Context` backed by a throwaway
+/// config file holding a token, and `Deps` wired to a scripted transport.
+#[cfg(test)]
+pub mod testing {
+    use super::*;
+    use crate::config::{self, ConfigFile};
+    use crate::confirmation::Opener;
+    use crate::http::TransportOutcome;
+    use crate::sleep::NoopSleeper;
+    use crate::test_support::ScriptedTransport;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    pub struct RecordingOpener {
+        pub opened: Mutex<Vec<String>>,
+    }
+    impl Default for RecordingOpener {
+        fn default() -> Self {
+            Self {
+                opened: Mutex::new(Vec::new()),
+            }
+        }
+    }
+    impl RecordingOpener {
+        pub fn new() -> Self {
+            Self::default()
+        }
+    }
+    impl Opener for RecordingOpener {
+        fn open(&self, url: &str) {
+            self.opened.lock().unwrap().push(url.to_string());
+        }
+    }
+
+    /// A context whose config file carries a token, so `ctx.client()`
+    /// resolves without touching the developer's real config.
+    pub fn ctx(json: bool) -> Context {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!("keylight-cli-cmd-test-{n}.toml"));
+        config::write_config(
+            &path,
+            &ConfigFile {
+                token: Some("klm_test".into()),
+            },
+        )
+        .unwrap();
+        Context {
+            json,
+            no_browser: true,
+            api_url: "https://api.test".into(),
+            config_path: path,
+            is_tty: false,
+        }
+    }
+
+    pub fn cleanup(ctx: &Context) {
+        let _ = config::delete_config(&ctx.config_path);
+    }
+
+    pub fn deps<'a>(transport: &Arc<ScriptedTransport>, opener: &'a RecordingOpener) -> Deps<'a> {
+        Deps {
+            transport: transport.clone(),
+            sleeper: Arc::new(NoopSleeper::default()),
+            opener,
+            max_polls: Some(10),
+        }
+    }
+
+    pub fn transport(responses: Vec<TransportOutcome>) -> Arc<ScriptedTransport> {
+        Arc::new(ScriptedTransport::new(responses))
+    }
+
+    /// The (method, url, body) of the nth recorded request.
+    pub fn request_at(t: &Arc<ScriptedTransport>, n: usize) -> (String, String, Option<String>) {
+        let reqs = t.requests.lock().unwrap();
+        let (m, u, _, b) = &reqs[n];
+        (m.clone(), u.clone(), b.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_path_with_no_params_is_the_bare_path() {
+        assert_eq!(
+            query_path("/v1/products", &[("limit", None)]),
+            "/v1/products"
+        );
+    }
+
+    /// A cursor is opaque server state and routinely contains `=` or `+`;
+    /// pasting it in raw would corrupt the query string.
+    #[test]
+    fn query_values_are_percent_encoded() {
+        let p = query_path("/v1/products", &[("cursor", Some("a+b/c=".into()))]);
+        assert_eq!(p, "/v1/products?cursor=a%2Bb%2Fc%3D");
+    }
+
+    #[test]
+    fn query_path_joins_several_params() {
+        let p = query_path(
+            "/v1/licenses",
+            &[
+                ("limit", Some("10".into())),
+                ("status", Some("active".into())),
+            ],
+        );
+        assert_eq!(p, "/v1/licenses?limit=10&status=active");
+    }
+
+    /// Guessing which way an on/off flag was meant has no safe answer when
+    /// the write lands on a live app.
+    #[test]
+    fn a_toggle_with_neither_flag_is_an_error_not_a_default() {
+        assert!(require_toggle(false, false, "--enabled", "--disabled").is_err());
+    }
+
+    #[test]
+    fn a_toggle_resolves_each_direction() {
+        assert!(require_toggle(true, false, "--enabled", "--disabled").unwrap());
+        assert!(!require_toggle(false, true, "--enabled", "--disabled").unwrap());
+    }
+
+    /// The error names the flag, since several flags take JSON and
+    /// serde's own message doesn't say which one failed.
+    #[test]
+    fn a_malformed_json_flag_names_the_flag_that_failed() {
+        let err = parse_json_flag(Some("{not json".into()), "--prices").unwrap_err();
+        assert!(err.to_string().contains("--prices"), "got: {err}");
+    }
 
     #[test]
     fn json_body_omits_unsupplied_fields_entirely() {

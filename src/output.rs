@@ -104,14 +104,40 @@ pub fn cell(value: Option<&serde_json::Value>) -> String {
     }
 }
 
-/// `2026-06-18T09:31:02.000Z` → `2026-06-18`. Table columns show the date;
-/// `--json` keeps the full timestamp for anyone who needs it.
-pub fn date_only(value: Option<&serde_json::Value>) -> String {
-    let s = cell(value);
-    match s.split_once('T') {
-        Some((date, _)) => date.to_string(),
-        None => s,
+/// Unix milliseconds → `YYYY-MM-DD` (UTC). Every timestamp the management API
+/// returns — `createdAt`, `updatedAt`, `expiresAt` — is an integer of Unix ms,
+/// not an ISO string, so a table column needs converting rather than
+/// truncating. `--json` passes the raw number through for anyone who wants the
+/// time or a different zone.
+///
+/// Hand-rolled rather than pulling in `chrono` for one function: the CLI has
+/// four dependencies and a date crate would be the largest of them.
+pub fn date_from_ms(value: Option<&serde_json::Value>) -> String {
+    match value.and_then(|v| v.as_i64()) {
+        Some(ms) => {
+            let (y, m, d) = civil_from_days(ms.div_euclid(86_400_000));
+            format!("{y:04}-{m:02}-{d:02}")
+        }
+        // Non-numeric (including an explicit null `expiresAt`, which means a
+        // perpetual license) falls through to the normal cell rendering.
+        None => cell(value),
     }
+}
+
+/// Days since the Unix epoch → civil (year, month, day). Howard Hinnant's
+/// `civil_from_days`, which is exact for the whole proleptic Gregorian range
+/// and needs no lookup tables or leap-year special-casing.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
 }
 
 /// Print the cursor that continues a list, when the server sent one.
@@ -196,18 +222,47 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_are_truncated_to_the_date() {
+    fn unix_ms_renders_as_a_utc_date() {
+        // 2026-06-18T09:31:02Z
         assert_eq!(
-            date_only(Some(&serde_json::json!("2026-06-18T09:31:02.000Z"))),
+            date_from_ms(Some(&serde_json::json!(1_781_775_062_000i64))),
             "2026-06-18"
         );
     }
 
-    /// A value that isn't a timestamp passes through rather than being
-    /// mangled by the split.
+    /// A null `expiresAt` means a perpetual license, not a date — it must
+    /// fall through to the normal dash rather than becoming the epoch.
     #[test]
-    fn a_non_timestamp_passes_through_date_only_untouched() {
-        assert_eq!(date_only(Some(&serde_json::json!("never"))), "never");
-        assert_eq!(date_only(None), "-");
+    fn a_null_timestamp_is_a_dash_not_the_epoch() {
+        assert_eq!(date_from_ms(Some(&serde_json::Value::Null)), "-");
+        assert_eq!(date_from_ms(None), "-");
+    }
+
+    #[test]
+    fn the_epoch_itself_renders_correctly() {
+        assert_eq!(date_from_ms(Some(&serde_json::json!(0))), "1970-01-01");
+    }
+
+    /// Leap-year handling is the classic off-by-one in a hand-rolled date
+    /// conversion, and 2000 is the century that *is* a leap year.
+    #[test]
+    fn leap_days_land_on_the_right_date() {
+        // 2000-02-29T00:00:00Z and 2024-02-29T00:00:00Z
+        assert_eq!(
+            date_from_ms(Some(&serde_json::json!(951_782_400_000i64))),
+            "2000-02-29"
+        );
+        assert_eq!(
+            date_from_ms(Some(&serde_json::json!(1_709_164_800_000i64))),
+            "2024-02-29"
+        );
+    }
+
+    /// Timestamps before 1970 are negative; truncating division would round
+    /// them toward zero and land on the wrong day.
+    #[test]
+    fn a_pre_epoch_timestamp_does_not_round_the_wrong_way() {
+        // 1969-12-31T23:59:59Z — one second before the epoch.
+        assert_eq!(date_from_ms(Some(&serde_json::json!(-1000))), "1969-12-31");
     }
 }
