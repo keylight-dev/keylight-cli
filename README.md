@@ -1,6 +1,14 @@
+<a href="https://keylight.dev">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/keylight-wordmark-white.svg">
+    <img alt="Keylight" src="assets/keylight-wordmark-black.svg" width="176">
+  </picture>
+</a>
+
 # Keylight CLI
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![keylight.dev](https://img.shields.io/badge/keylight.dev-171717)](https://keylight.dev)
 
 The open-source command-line client for the [Keylight](https://keylight.dev) management API —
 think `wrangler`, but for your Keylight tenant: apps, key types, licenses, and payment
@@ -136,4 +144,4 @@ for anything that touches the config file — `cargo test` never reads or writes
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache-2.0 — see [LICENSE](LICENSE).
