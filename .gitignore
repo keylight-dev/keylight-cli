@@ -1,1 +1,6 @@
 /target
+
+# Exported license data must never land in the repo. `licenses export` writes
+# CSV to stdout by default, so a stray redirect drops a file here — and that
+# file would contain real customer license records.
+*.csv
