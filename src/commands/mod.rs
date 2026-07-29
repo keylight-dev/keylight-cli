@@ -20,17 +20,18 @@ pub struct Context {
     pub no_browser: bool,
     pub api_url: String,
     pub config_path: PathBuf,
-}
-
-impl Context {
     /// True when stdout is an interactive terminal — gates browser-opening
     /// (never pop a browser in a CI log or a piped script) alongside the
     /// explicit `--no-browser` flag.
-    pub fn is_tty(&self) -> bool {
-        use std::io::IsTerminal;
-        std::io::stdout().is_terminal()
-    }
+    ///
+    /// A resolved field rather than a method reading the real stdout, so a
+    /// test can exercise both sides of the gate. As a method it was
+    /// unconditionally `false` under `cargo test`, which meant the
+    /// browser-opening branch had no coverage at all.
+    pub is_tty: bool,
+}
 
+impl Context {
     pub fn env_token(&self) -> Option<String> {
         std::env::var(config::ENV_TOKEN).ok()
     }
@@ -104,7 +105,7 @@ fn on_pending_notice(pending: &crate::api::PendingConfirmation) {
 fn confirm_opts<'a>(ctx: &Context, deps: &'a Deps<'a>) -> ConfirmOptions<'a> {
     ConfirmOptions {
         no_browser: ctx.no_browser,
-        is_tty: ctx.is_tty(),
+        is_tty: ctx.is_tty,
         opener: deps.opener,
         sleeper: deps.sleeper.as_ref(),
         on_pending: &on_pending_notice,

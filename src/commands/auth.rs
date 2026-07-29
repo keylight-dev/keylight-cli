@@ -1,14 +1,11 @@
 //! `keylight auth set-token` / `keylight auth status`.
 
-use super::Context;
-use crate::api::{ApiClient, ApiOutcome};
+use super::{Context, Deps};
+use crate::api::ApiOutcome;
 use crate::config::{self, ConfigFile};
 use crate::error::{CliError, Result};
-use crate::http::ureq_transport::UreqTransport;
 use crate::output::emit;
-use crate::sleep::RealSleeper;
 use std::io::BufRead;
-use std::sync::Arc;
 
 /// Read the token from stdin — **never** from an argv/flag value, since
 /// process arguments land in shell history and are visible to other users
@@ -16,7 +13,7 @@ use std::sync::Arc;
 /// and Enter) and piped (`echo "$TOKEN" | keylight auth set-token`, the
 /// CI path).
 pub fn set_token(ctx: &Context, reader: &mut dyn BufRead) -> Result<()> {
-    if ctx.is_tty() {
+    if ctx.is_tty {
         eprintln!("Paste your Keylight API token (klm_...), then press Enter:");
     }
     let mut line = String::new();
@@ -43,14 +40,8 @@ pub fn set_token(ctx: &Context, reader: &mut dyn BufRead) -> Result<()> {
 }
 
 /// `GET /v1/tokens/verify` — who am I: tenant, token id, scopes.
-pub fn status(ctx: &Context) -> Result<()> {
-    let token = config::require_token(ctx.env_token(), &ctx.config_path)?;
-    let client = ApiClient::new(
-        Arc::new(UreqTransport::default()),
-        Arc::new(RealSleeper),
-        ctx.api_url.clone(),
-        token,
-    );
+pub fn status(ctx: &Context, deps: &Deps) -> Result<()> {
+    let client = ctx.client(deps)?;
     let value = match client.get("/v1/tokens/verify")? {
         ApiOutcome::Ok { value, .. } => value,
         // /v1/tokens/verify is a plain (non-gated) endpoint per the API
@@ -95,6 +86,7 @@ mod tests {
             no_browser: true,
             api_url: "https://api.keylight.dev".into(),
             config_path: std::env::temp_dir().join(format!("keylight-cli-auth-test-{n}.toml")),
+            is_tty: false,
         }
     }
 

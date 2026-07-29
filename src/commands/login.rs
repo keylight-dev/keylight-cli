@@ -5,44 +5,12 @@
 //! localhost. The human step happens on the server's grant page; this module
 //! only starts the flow, shows the code, and waits.
 
-use super::Context;
-use crate::api::ApiClient;
+use super::{Context, Deps};
 use crate::config::{self, ConfigFile};
-use crate::confirmation::{Opener, RealOpener};
 use crate::device_auth::{self, PollOutcome};
 use crate::error::{CliError, Result};
-use crate::http::ureq_transport::UreqTransport;
 use crate::output::emit;
-use crate::sleep::{RealSleeper, Sleeper};
 use std::io::Write;
-use std::sync::Arc;
-
-/// Every scope except `danger`. The grant page pre-checks what is requested and
-/// lets the human narrow it, so asking for the working set is the useful
-/// default. `danger` is excluded deliberately: the grant page leaves it
-/// unchecked, and destructive access should be an explicit request.
-pub fn default_scopes() -> Vec<String> {
-    [
-        "products:read",
-        "products:write",
-        "licenses:read",
-        "licenses:write",
-        "customers:read",
-        "customers:write",
-        "integrations:read",
-        "integrations:write",
-        "usage:read",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
-}
-
-/// `None` means "no --scope flag given"; `Some(vec![])` means the caller
-/// explicitly asked for a token with no permissions, which is a real request.
-pub fn resolve_scopes(requested: Option<Vec<String>>) -> Vec<String> {
-    requested.unwrap_or_else(default_scopes)
-}
 
 /// Print the code/URL/waiting-message progress lines.
 ///
@@ -64,12 +32,9 @@ fn print_progress(
     let _ = writeln!(w, "Waiting for approval (Ctrl+C to cancel)...");
 }
 
-pub fn login(ctx: &Context, scopes: Option<Vec<String>>) -> Result<()> {
-    let transport = Arc::new(UreqTransport::default());
-    let sleeper: Arc<dyn Sleeper> = Arc::new(RealSleeper);
-    let client = ApiClient::anonymous(transport, sleeper.clone(), ctx.api_url.clone());
-
-    let started = device_auth::start(&client, &resolve_scopes(scopes))?;
+pub fn login(ctx: &Context, deps: &Deps, scopes: Option<Vec<String>>) -> Result<()> {
+    let client = ctx.anonymous_client(deps);
+    let started = device_auth::start(&client, scopes.as_deref())?;
 
     let verify_url = started
         .verification_uri_complete
@@ -84,11 +49,11 @@ pub fn login(ctx: &Context, scopes: Option<Vec<String>>) -> Result<()> {
         &mut std::io::stderr(),
     );
 
-    if !ctx.no_browser && ctx.is_tty() {
-        RealOpener.open(verify_url);
+    if !ctx.no_browser && ctx.is_tty {
+        deps.opener.open(verify_url);
     }
 
-    match device_auth::poll_until_complete(&client, &sleeper, &started)? {
+    match device_auth::poll_until_complete(&client, &deps.sleeper, &started)? {
         PollOutcome::Approved {
             token,
             scopes,
@@ -117,31 +82,6 @@ pub fn login(ctx: &Context, scopes: Option<Vec<String>>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn default_scopes_cover_the_working_set_and_exclude_danger() {
-        let s = default_scopes();
-        assert!(s.contains(&"products:read".to_string()));
-        assert!(s.contains(&"licenses:write".to_string()));
-        assert!(s.contains(&"usage:read".to_string()));
-        assert!(
-            !s.contains(&"danger".to_string()),
-            "danger must stay an explicit opt-in"
-        );
-    }
-
-    #[test]
-    fn explicit_scopes_win_over_the_defaults() {
-        assert_eq!(
-            resolve_scopes(Some(vec!["usage:read".into()])),
-            vec!["usage:read".to_string()]
-        );
-    }
-
-    #[test]
-    fn no_flag_falls_back_to_the_defaults() {
-        assert_eq!(resolve_scopes(None), default_scopes());
-    }
 
     // Under `--json`, stdout must carry only the final JSON object emitted by
     // `emit` — a caller piping stdout through `jq` must not see the code/URL
@@ -191,10 +131,88 @@ mod tests {
         assert!(out_str.contains("https://app.keylight.dev/x"));
     }
 
-    // An empty --scope list is a meaningful request: a token that can only
-    // confirm which account it belongs to. It must not silently become "all".
+    // ---- the TTY / --no-browser gate -------------------------------------
+    //
+    // This gate had no coverage until `Deps` and `Context::is_tty` became
+    // injectable: `login` constructed RealOpener/UreqTransport inline, and
+    // `is_tty()` read the real stdout, which is never a terminal under
+    // `cargo test`. The browser-opening branch was therefore unreachable
+    // from a test — the deferred finding from the step 1 review.
+
+    use crate::commands::Deps;
+    use crate::confirmation::Opener;
+    use crate::sleep::NoopSleeper;
+    use crate::test_support::{ScriptedTransport, resp};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    struct RecordingOpener {
+        opened: Mutex<Vec<String>>,
+    }
+    impl Opener for RecordingOpener {
+        fn open(&self, url: &str) {
+            self.opened.lock().unwrap().push(url.to_string());
+        }
+    }
+
+    const START_BODY: &str = r#"{"device_code":"dev1","user_code":"ABCD-1234","verification_uri":"https://app.keylight.dev/login/device","verification_uri_complete":"https://app.keylight.dev/login/device?code=ABCD-1234","interval":5,"expires_in":900}"#;
+    const APPROVED_BODY: &str =
+        r#"{"status":"approved","token":"klm_new","scopes":["usage:read"],"name":"laptop"}"#;
+
+    fn login_ctx(no_browser: bool, is_tty: bool) -> Context {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        Context {
+            json: true, // keep the human progress lines off the test's stdout
+            no_browser,
+            api_url: "https://api.test".into(),
+            config_path: std::env::temp_dir().join(format!("keylight-cli-login-test-{n}.toml")),
+            is_tty,
+        }
+    }
+
+    /// Runs a full approved login and reports which URLs the browser was
+    /// asked to open.
+    fn run_login(no_browser: bool, is_tty: bool) -> Vec<String> {
+        let transport = Arc::new(ScriptedTransport::new(vec![
+            resp(200, START_BODY, None),
+            resp(200, APPROVED_BODY, None),
+        ]));
+        let opener = RecordingOpener {
+            opened: Mutex::new(Vec::new()),
+        };
+        let deps = Deps {
+            transport,
+            sleeper: Arc::new(NoopSleeper::default()),
+            opener: &opener,
+            max_polls: Some(5),
+        };
+        let ctx = login_ctx(no_browser, is_tty);
+        login(&ctx, &deps, Some(vec!["usage:read".into()])).unwrap();
+        let _ = crate::config::delete_config(&ctx.config_path);
+        let opened = opener.opened.lock().unwrap();
+        opened.clone()
+    }
+
     #[test]
-    fn an_explicitly_empty_scope_list_is_preserved() {
-        assert_eq!(resolve_scopes(Some(vec![])), Vec::<String>::new());
+    fn at_a_tty_the_browser_opens_on_the_complete_verification_url() {
+        // The `_complete` variant is the one that pre-fills the code, so it
+        // is what the human should land on when a browser is available.
+        assert_eq!(
+            run_login(false, true),
+            ["https://app.keylight.dev/login/device?code=ABCD-1234"]
+        );
+    }
+
+    #[test]
+    fn no_browser_flag_suppresses_opening_even_at_a_tty() {
+        assert!(run_login(true, true).is_empty());
+    }
+
+    /// Piped output or a CI log must never pop a browser, flag or no flag.
+    #[test]
+    fn a_non_tty_suppresses_opening_without_the_flag() {
+        assert!(run_login(false, false).is_empty());
     }
 }

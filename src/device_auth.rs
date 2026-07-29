@@ -24,8 +24,19 @@ pub struct DeviceAuthStart {
 
 /// Begin device authorization. Public endpoint — call with
 /// [`ApiClient::anonymous`], since there is no token yet.
-pub fn start(client: &ApiClient, scopes: &[String]) -> Result<DeviceAuthStart> {
-    let body = serde_json::json!({ "scopes": scopes });
+/// `scopes: None` omits the field entirely, letting the server apply its own
+/// default (every scope except `danger` — `login-device.ts` falls back to
+/// `API_TOKEN_SCOPES.filter(s => s !== 'danger')` whenever the field isn't an
+/// array). Restating that list here would duplicate a server constant and
+/// silently go stale the first time a scope is added.
+///
+/// `Some(&[])` is a different request: a token with no permissions at all,
+/// which is a real thing to ask for and must not be rewritten to the default.
+pub fn start(client: &ApiClient, scopes: Option<&[String]>) -> Result<DeviceAuthStart> {
+    let body = match scopes {
+        Some(s) => serde_json::json!({ "scopes": s }),
+        None => serde_json::json!({}),
+    };
     match client.call("POST", "/v1/login/device", Some(&body), None)? {
         ApiOutcome::Ok { value, .. } => {
             serde_json::from_value(value).map_err(|_| CliError::InvalidResponse)
@@ -156,7 +167,7 @@ mod tests {
             "https://api.test",
         );
 
-        let out = start(&c, &["products:read".to_string()]).unwrap();
+        let out = start(&c, Some(&["products:read".to_string()])).unwrap();
 
         assert_eq!(out.user_code, "3DN7-GUUW");
         assert_eq!(out.device_code, "abc123");
@@ -170,8 +181,13 @@ mod tests {
         assert_eq!(body.as_deref().unwrap(), r#"{"scopes":["products:read"]}"#);
     }
 
+    /// No `--scope` flag must omit the field entirely rather than restating
+    /// the server's default list. `login-device.ts` applies
+    /// `API_TOKEN_SCOPES.filter(s => s !== 'danger')` whenever `scopes` isn't
+    /// an array, so duplicating that list client-side would silently go stale
+    /// the first time a scope is added server-side.
     #[test]
-    fn start_sends_an_empty_scope_array_when_none_requested() {
+    fn start_omits_scopes_entirely_when_none_were_requested() {
         let t = Arc::new(ScriptedTransport::new(vec![resp(200, START_BODY, None)]));
         let c = ApiClient::anonymous(
             t.clone(),
@@ -179,7 +195,28 @@ mod tests {
             "https://api.test",
         );
 
-        start(&c, &[]).unwrap();
+        start(&c, None).unwrap();
+
+        let reqs = t.requests.lock().unwrap();
+        let (_, _, _, body) = &reqs[0];
+        assert_eq!(
+            body.as_deref().unwrap(),
+            "{}",
+            "the field must be absent, not an empty array — an empty array \
+             asks for a token with no permissions at all"
+        );
+    }
+
+    #[test]
+    fn start_sends_an_empty_scope_array_when_explicitly_asked_for_none() {
+        let t = Arc::new(ScriptedTransport::new(vec![resp(200, START_BODY, None)]));
+        let c = ApiClient::anonymous(
+            t.clone(),
+            Arc::new(NoopSleeper::default()),
+            "https://api.test",
+        );
+
+        start(&c, Some(&[])).unwrap();
 
         let reqs = t.requests.lock().unwrap();
         let (_, _, _, body) = &reqs[0];
@@ -197,7 +234,7 @@ mod tests {
         ]));
         let c = ApiClient::anonymous(t, Arc::new(NoopSleeper::default()), "https://api.test");
 
-        let err = start(&c, &[]).unwrap_err();
+        let err = start(&c, Some(&[])).unwrap_err();
         assert!(matches!(
             err,
             CliError::RateLimited { .. } | CliError::Api { .. }

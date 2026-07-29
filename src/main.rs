@@ -11,9 +11,10 @@
 //! without changing either.
 
 use clap::{Parser, Subcommand};
-use keylight_cli::commands::{self, Context};
+use keylight_cli::commands::{self, Context, Deps};
 use keylight_cli::config;
 use keylight_cli::error::CliError;
+use std::io::IsTerminal;
 
 #[derive(Parser)]
 #[command(
@@ -88,10 +89,12 @@ fn main() {
         no_browser: cli.no_browser,
         api_url: cli.api_url,
         config_path,
+        is_tty: std::io::stdout().is_terminal(),
     };
+    let deps = Deps::real();
 
     let result = match cli.command {
-        Command::Login { scope } => commands::login::login(&ctx, scope),
+        Command::Login { scope } => commands::login::login(&ctx, &deps, scope),
         Command::Logout => commands::logout::logout(&ctx),
         Command::Auth { command } => match command {
             AuthCommand::SetToken => {
@@ -99,7 +102,7 @@ fn main() {
                 let mut lock = stdin.lock();
                 commands::auth::set_token(&ctx, &mut lock)
             }
-            AuthCommand::Status => commands::auth::status(&ctx),
+            AuthCommand::Status => commands::auth::status(&ctx, &deps),
         },
     };
 

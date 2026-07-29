@@ -47,6 +47,7 @@ mod tests {
             no_browser: true,
             api_url: "https://api.keylight.dev".into(),
             config_path: std::env::temp_dir().join(format!("keylight-cli-logout-test-{n}.toml")),
+            is_tty: false,
         }
     }
 
