@@ -22,8 +22,21 @@ pub struct DeviceAuthStart {
     pub expires_in: u64,
 }
 
+/// Sent as the client `name`. The server defaults to the bare string "CLI"
+/// when it isn't supplied, which is what the grant page and the resulting
+/// token in Settings → API tokens were both labelled with.
+///
+/// This is a **self-reported** label, not an identity: the field is
+/// caller-supplied, so any client can send any string here — including this
+/// one. It exists so a human can tell their own sessions apart, and must
+/// never be rendered as proof of who is asking.
+fn client_name() -> String {
+    format!("Keylight CLI {}", env!("CARGO_PKG_VERSION"))
+}
+
 /// Begin device authorization. Public endpoint — call with
 /// [`ApiClient::anonymous`], since there is no token yet.
+///
 /// `scopes: None` omits the field entirely, letting the server apply its own
 /// default (every scope except `danger` — `login-device.ts` falls back to
 /// `API_TOKEN_SCOPES.filter(s => s !== 'danger')` whenever the field isn't an
@@ -34,8 +47,8 @@ pub struct DeviceAuthStart {
 /// which is a real thing to ask for and must not be rewritten to the default.
 pub fn start(client: &ApiClient, scopes: Option<&[String]>) -> Result<DeviceAuthStart> {
     let body = match scopes {
-        Some(s) => serde_json::json!({ "scopes": s }),
-        None => serde_json::json!({}),
+        Some(s) => serde_json::json!({ "scopes": s, "name": client_name() }),
+        None => serde_json::json!({ "name": client_name() }),
     };
     match client.call("POST", "/v1/login/device", Some(&body), None)? {
         ApiOutcome::Ok { value, .. } => {
@@ -178,7 +191,11 @@ mod tests {
         let (method, url, _, body) = &reqs[0];
         assert_eq!(method, "POST");
         assert!(url.ends_with("/v1/login/device"), "got {url}");
-        assert_eq!(body.as_deref().unwrap(), r#"{"scopes":["products:read"]}"#);
+        let sent: serde_json::Value = serde_json::from_str(body.as_deref().unwrap()).unwrap();
+        assert_eq!(sent["scopes"], serde_json::json!(["products:read"]));
+        // A name so the human can tell their own sessions apart in
+        // Settings > API tokens; the server otherwise labels everything "CLI".
+        assert_eq!(sent["name"], client_name());
     }
 
     /// No `--scope` flag must omit the field entirely rather than restating
@@ -186,6 +203,16 @@ mod tests {
     /// `API_TOKEN_SCOPES.filter(s => s !== 'danger')` whenever `scopes` isn't
     /// an array, so duplicating that list client-side would silently go stale
     /// the first time a scope is added server-side.
+    /// The name is self-reported and must never be read as an identity — any
+    /// client can send any string. It carries a version so a human can tell
+    /// their own sessions apart, nothing more.
+    #[test]
+    fn the_client_name_is_a_self_reported_label_carrying_the_version() {
+        let n = client_name();
+        assert!(n.starts_with("Keylight CLI "), "got {n}");
+        assert!(n.contains(env!("CARGO_PKG_VERSION")), "got {n}");
+    }
+
     #[test]
     fn start_omits_scopes_entirely_when_none_were_requested() {
         let t = Arc::new(ScriptedTransport::new(vec![resp(200, START_BODY, None)]));
@@ -199,11 +226,11 @@ mod tests {
 
         let reqs = t.requests.lock().unwrap();
         let (_, _, _, body) = &reqs[0];
-        assert_eq!(
-            body.as_deref().unwrap(),
-            "{}",
+        let sent: serde_json::Value = serde_json::from_str(body.as_deref().unwrap()).unwrap();
+        assert!(
+            !sent.as_object().unwrap().contains_key("scopes"),
             "the field must be absent, not an empty array — an empty array \
-             asks for a token with no permissions at all"
+             asks for a token with no permissions at all: {sent}"
         );
     }
 
@@ -220,7 +247,8 @@ mod tests {
 
         let reqs = t.requests.lock().unwrap();
         let (_, _, _, body) = &reqs[0];
-        assert_eq!(body.as_deref().unwrap(), r#"{"scopes":[]}"#);
+        let sent: serde_json::Value = serde_json::from_str(body.as_deref().unwrap()).unwrap();
+        assert_eq!(sent["scopes"], serde_json::json!([]));
     }
 
     #[test]
