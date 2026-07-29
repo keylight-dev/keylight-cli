@@ -61,6 +61,11 @@ enum Command {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    /// Manage licenses.
+    Licenses {
+        #[command(subcommand)]
+        command: commands::licenses::LicensesCommand,
+    },
     /// Manage apps and their license key types.
     Products {
         #[command(subcommand)]
@@ -109,6 +114,7 @@ fn main() {
             }
             AuthCommand::Status => commands::auth::status(&ctx, &deps),
         },
+        Command::Licenses { command } => commands::licenses::run(&ctx, &deps, command),
         Command::Products { command } => commands::products::run(&ctx, &deps, command),
     };
 

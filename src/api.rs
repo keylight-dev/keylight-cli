@@ -139,7 +139,24 @@ impl ApiClient {
         body: Option<&serde_json::Value>,
         confirmation_id: Option<&str>,
     ) -> Result<ApiOutcome> {
-        match self.settle(method, path, body, confirmation_id)? {
+        self.call_with_headers(method, path, body, confirmation_id, &[])
+    }
+
+    /// As [`ApiClient::call`], with additional request headers.
+    ///
+    /// `POST /v1/licenses` and `POST /v1/licenses/import` accept an
+    /// `Idempotency-Key`, which matters because a retried mint that the
+    /// server already processed would otherwise issue a second license to the
+    /// same customer.
+    pub fn call_with_headers(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        confirmation_id: Option<&str>,
+        extra: &[(String, String)],
+    ) -> Result<ApiOutcome> {
+        match self.settle_with(method, path, body, confirmation_id, extra)? {
             Settled::Pending(p) => Ok(ApiOutcome::Pending(p)),
             Settled::Body { body, retry_after } => {
                 let value = if body.trim().is_empty() {
@@ -175,8 +192,20 @@ impl ApiClient {
         body: Option<&serde_json::Value>,
         confirmation_id: Option<&str>,
     ) -> Result<Settled> {
+        self.settle_with(method, path, body, confirmation_id, &[])
+    }
+
+    fn settle_with(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        confirmation_id: Option<&str>,
+        extra: &[(String, String)],
+    ) -> Result<Settled> {
         let url = self.url(path);
-        let headers = self.headers(confirmation_id);
+        let mut headers = self.headers(confirmation_id);
+        headers.extend_from_slice(extra);
         let body_str = body.map(|b| b.to_string());
         let outcome = self
             .transport

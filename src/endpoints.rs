@@ -67,6 +67,19 @@ pub const COVERED: &[(&str, &str, &str)] = &[
         "/v1/products/{productId}/key-types/verify-prices",
         "products key-types verify-prices",
     ),
+    // licenses
+    ("GET", "/v1/licenses", "licenses list"),
+    ("POST", "/v1/licenses", "licenses create"),
+    ("GET", "/v1/licenses/{licenseId}", "licenses get"),
+    ("POST", "/v1/licenses/{licenseId}/revoke", "licenses revoke"),
+    ("POST", "/v1/licenses/{licenseId}/remint", "licenses remint"),
+    (
+        "POST",
+        "/v1/licenses/{licenseId}/deactivate-device",
+        "licenses deactivate-device",
+    ),
+    ("POST", "/v1/licenses/import", "licenses import"),
+    ("GET", "/v1/licenses/export", "licenses export"),
 ];
 
 /// Endpoints that are deliberately not commands, each with the reason.
@@ -92,18 +105,6 @@ pub const NOT_COMMANDS: &[(&str, &str, &str)] = &[
 /// appearing in the spec, and so the remaining work is visible in the test
 /// output rather than being silently uncounted. This list must reach empty.
 pub const PENDING: &[(&str, &str, &str)] = &[
-    ("GET", "/v1/licenses", "licenses list"),
-    ("POST", "/v1/licenses", "licenses create"),
-    ("GET", "/v1/licenses/{licenseId}", "licenses get"),
-    ("POST", "/v1/licenses/{licenseId}/revoke", "licenses revoke"),
-    ("POST", "/v1/licenses/{licenseId}/remint", "licenses remint"),
-    (
-        "POST",
-        "/v1/licenses/{licenseId}/deactivate-device",
-        "licenses deactivate-device",
-    ),
-    ("POST", "/v1/licenses/import", "licenses import"),
-    ("GET", "/v1/licenses/export", "licenses export"),
     ("GET", "/v1/customers", "customers list"),
     ("POST", "/v1/customers", "customers create"),
     ("GET", "/v1/customers/{customerId}", "customers get"),
