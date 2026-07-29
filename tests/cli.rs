@@ -50,7 +50,7 @@ fn no_subcommand_fails_with_usage() {
 }
 
 #[test]
-fn logout_json_shape_is_stable_and_requires_no_network() {
+fn logout_with_nothing_stored_makes_no_network_call_and_reports_it() {
     let home = tempfile::tempdir().unwrap();
     let assert = isolated_cmd(home.path())
         .args(["--json", "logout"])
@@ -59,20 +59,17 @@ fn logout_json_shape_is_stable_and_requires_no_network() {
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(json["removedLocalToken"], false);
-    assert!(
-        json["serverSideRevocation"]
-            .as_str()
-            .unwrap()
-            .contains("dashboard")
-    );
+    // Nothing to revoke, so nothing was revoked — and no request was made.
+    // Both keys are part of the machine-readable contract.
+    assert_eq!(json["revokedServerSide"], false);
 }
 
 #[test]
-fn logout_human_output_mentions_dashboard_revocation() {
+fn logout_with_nothing_stored_says_so_in_human_mode() {
     let home = tempfile::tempdir().unwrap();
     let assert = isolated_cmd(home.path()).arg("logout").assert().success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("dashboard"));
+    assert!(stdout.contains("No stored token"), "got: {stdout}");
 }
 
 #[test]

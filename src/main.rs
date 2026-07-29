@@ -56,7 +56,7 @@ enum Command {
         #[arg(long = "scope")]
         scope: Option<Vec<String>>,
     },
-    /// Remove the locally stored API token. Does not revoke it server-side.
+    /// Revoke the API token server-side and remove the local copy.
     Logout,
     /// Manage the stored API token.
     Auth {
@@ -138,7 +138,7 @@ fn main() {
 
     let result = match cli.command {
         Command::Login { scope } => commands::login::login(&ctx, &deps, scope),
-        Command::Logout => commands::logout::logout(&ctx),
+        Command::Logout => commands::logout::logout(&ctx, &deps),
         Command::Auth { command } => match command {
             AuthCommand::SetToken => {
                 let stdin = std::io::stdin();
