@@ -46,9 +46,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Authorize the CLI via browser (the dashboard grant page is not live
-    /// yet — see `keylight login --help`; `auth set-token` works today).
-    Login,
+    /// Authorize the CLI via your browser
+    Login {
+        /// Permission to request; repeat for several. Defaults to every
+        /// non-destructive scope.
+        #[arg(long = "scope")]
+        scope: Option<Vec<String>>,
+    },
     /// Remove the locally stored API token. Does not revoke it server-side.
     Logout,
     /// Manage the stored API token.
@@ -87,7 +91,7 @@ fn main() {
     };
 
     let result = match cli.command {
-        Command::Login => commands::login::login(&ctx),
+        Command::Login { scope } => commands::login::login(&ctx, scope),
         Command::Logout => commands::logout::logout(&ctx),
         Command::Auth { command } => match command {
             AuthCommand::SetToken => {
