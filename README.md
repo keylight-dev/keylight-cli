@@ -14,11 +14,36 @@ The open-source command-line client for the [Keylight](https://keylight.dev) man
 think `wrangler`, but for your Keylight tenant: apps, key types, licenses, and payment
 integrations, from the terminal instead of the dashboard.
 
-> **Status: alpha.** The management API is live (`https://api.keylight.dev/v1`, 37 endpoints —
-> see the public [OpenAPI spec](https://api.keylight.dev/v1/openapi.json)). This CLI has
-> working browser login, the HTTP core, and the confirm-gated approval flow — but
-> resource commands (`keylight apps`, `keylight licenses`, `keylight integrations`, ...) are
-> not built yet. Expect the command tree to grow; nothing here is a stability promise.
+> **Status: alpha.** Every endpoint the management API exposes
+> (`https://api.keylight.dev/v1` — see the public
+> [OpenAPI spec](https://api.keylight.dev/v1/openapi.json)) is reachable from a command, and a
+> coverage test fails the build if that stops being true. No release binaries yet, and flag
+> names may still change — nothing here is a stability promise.
+
+## Commands
+
+| Group | What it does |
+|---|---|
+| `keylight login` / `logout` / `auth` | Browser login (RFC 8628 device flow), token storage |
+| `keylight products` | Apps: list, create, update, free tier, Stripe test mode, per-provider prices |
+| `keylight products key-types` | License key types on an app |
+| `keylight licenses` | Issue, inspect, revoke, remint, deactivate a device, bulk import, CSV export |
+| `keylight customers` | Customers, their entitlements, and license links |
+| `keylight integrations` | Connect/disconnect payment providers, rotate webhook secrets |
+| `keylight webhook` | The outbound webhook URL and event subscriptions |
+| `keylight sdk-key` | Read or rotate the SDK key |
+| `keylight usage` | Activation and validation volume |
+| `keylight test-purchase` | Run and inspect an end-to-end test purchase |
+
+Two rules hold across every command:
+
+**No command ever requires an interactive prompt.** Every input is available as a flag, so an
+agent or a CI job can drive the whole surface. Secrets are the one exception to "as a flag" —
+they are read from environment variables you name (`--api-key-env`, `--secret-key-env`), because
+argv lands in shell history and is visible to other users via `ps`.
+
+**Pagination is explicit.** `list` commands take `--limit` and `--cursor` and print the next
+cursor when there is one. Nothing auto-pages: one command should mean one request.
 
 ## Install
 
@@ -119,8 +144,12 @@ When a command hits one of these, the CLI will:
 2. Poll until you approve or deny it in the browser (or it expires — 10 minutes).
 3. Automatically retry the original call once approved.
 
-This is built as reusable infrastructure now so every resource command that needs it (once
-those commands exist) gets it for free.
+Seven operations are gated: `licenses revoke`, `licenses export`, `products key-types delete`,
+`integrations rotate-secret`, `sdk-key get`, `sdk-key rotate`, and `webhook set`. You never have
+to know which — the CLI walks the flow whenever the server asks for it.
+
+The approval notice goes to **stderr** in both output modes, so `--json` stdout stays valid JSON
+and `keylight licenses export > licenses.csv` writes CSV to the file rather than an approval URL.
 
 ## Configuration
 

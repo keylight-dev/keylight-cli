@@ -3,12 +3,14 @@
 //! built on (design: docs/superpowers/specs/2026-07-23-management-api-cli-design.md
 //! in the main `keylight` repo).
 //!
-//! This is the **Phase 3a foundation**: auth/token handling, the HTTP core
-//! (bearer auth, the error envelope, 429 handling, the confirm-gated call
-//! flow), and `--json`. Endpoint commands (`keylight apps ...`,
-//! `keylight licenses ...`, etc.) land once the Phase 2 API surface ships —
-//! they'll be built on top of `api::ApiClient` and `confirmation::run_confirmable`
-//! without changing either.
+//! Every endpoint the management API exposes is reachable from a command;
+//! `tests/coverage.rs` fails the build if that stops being true.
+//!
+//! Commands are hand-written rather than generated from the OpenAPI spec.
+//! Help text, flag names, output formatting and error messages are the entire
+//! value over `curl`, and a generated CLI reads like `curl` with extra steps.
+//! Drift protection comes from the coverage test instead, which catches the
+//! failure that actually matters — an endpoint no command reaches.
 
 use clap::{Parser, Subcommand};
 use keylight_cli::commands::{self, Context, Deps};
@@ -61,6 +63,16 @@ enum Command {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    /// Manage customers.
+    Customers {
+        #[command(subcommand)]
+        command: commands::customers::CustomersCommand,
+    },
+    /// Manage payment-provider integrations.
+    Integrations {
+        #[command(subcommand)]
+        command: commands::integrations::IntegrationsCommand,
+    },
     /// Manage licenses.
     Licenses {
         #[command(subcommand)]
@@ -70,6 +82,27 @@ enum Command {
     Products {
         #[command(subcommand)]
         command: commands::products::ProductsCommand,
+    },
+    /// Read or rotate the SDK key.
+    SdkKey {
+        #[command(subcommand)]
+        command: commands::misc::SdkKeyCommand,
+    },
+    /// Run and inspect test purchases.
+    TestPurchase {
+        #[command(subcommand)]
+        command: commands::misc::TestPurchaseCommand,
+    },
+    /// Show activation and validation volume.
+    Usage {
+        /// How many days back to report.
+        #[arg(long)]
+        days: Option<u32>,
+    },
+    /// Configure the outbound webhook.
+    Webhook {
+        #[command(subcommand)]
+        command: commands::misc::WebhookCommand,
     },
 }
 
@@ -114,8 +147,16 @@ fn main() {
             }
             AuthCommand::Status => commands::auth::status(&ctx, &deps),
         },
+        Command::Customers { command } => commands::customers::run(&ctx, &deps, command),
+        Command::Integrations { command } => commands::integrations::run(&ctx, &deps, command),
         Command::Licenses { command } => commands::licenses::run(&ctx, &deps, command),
         Command::Products { command } => commands::products::run(&ctx, &deps, command),
+        Command::SdkKey { command } => commands::misc::run_sdk_key(&ctx, &deps, command),
+        Command::TestPurchase { command } => {
+            commands::misc::run_test_purchase(&ctx, &deps, command)
+        }
+        Command::Usage { days } => commands::misc::run_usage(&ctx, &deps, days),
+        Command::Webhook { command } => commands::misc::run_webhook(&ctx, &deps, command),
     };
 
     if let Err(e) = result {

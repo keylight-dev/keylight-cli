@@ -80,31 +80,7 @@ pub const COVERED: &[(&str, &str, &str)] = &[
     ),
     ("POST", "/v1/licenses/import", "licenses import"),
     ("GET", "/v1/licenses/export", "licenses export"),
-];
-
-/// Endpoints that are deliberately not commands, each with the reason.
-///
-/// An explicit list rather than a silent omission: a gap should be a decision
-/// someone made, not something nobody noticed.
-pub const NOT_COMMANDS: &[(&str, &str, &str)] = &[
-    (
-        "GET",
-        "/v1/openapi.json",
-        "the spec itself — read by this coverage test, not by a command",
-    ),
-    (
-        "GET",
-        "/v1/confirmations/{id}",
-        "internal to the confirm-gated flow in confirmation.rs; polled, never invoked directly",
-    ),
-];
-
-/// Endpoints whose command group has not been built yet.
-///
-/// Listed explicitly so the coverage test still fails on a *new* endpoint
-/// appearing in the spec, and so the remaining work is visible in the test
-/// output rather than being silently uncounted. This list must reach empty.
-pub const PENDING: &[(&str, &str, &str)] = &[
+    // customers
     ("GET", "/v1/customers", "customers list"),
     ("POST", "/v1/customers", "customers create"),
     ("GET", "/v1/customers/{customerId}", "customers get"),
@@ -118,6 +94,7 @@ pub const PENDING: &[(&str, &str, &str)] = &[
         "/v1/customers/{customerId}/link-license",
         "customers link-license",
     ),
+    // integrations
     ("GET", "/v1/integrations", "integrations list"),
     (
         "GET",
@@ -144,6 +121,7 @@ pub const PENDING: &[(&str, &str, &str)] = &[
         "/v1/integrations/{provider}/rotate-secret",
         "integrations rotate-secret",
     ),
+    // sdk-key, webhook, usage, test-purchase
     ("GET", "/v1/sdk-key", "sdk-key get"),
     ("POST", "/v1/sdk-key/rotate", "sdk-key rotate"),
     ("GET", "/v1/webhook", "webhook get"),
@@ -152,3 +130,28 @@ pub const PENDING: &[(&str, &str, &str)] = &[
     ("POST", "/v1/test-purchase", "test-purchase create"),
     ("GET", "/v1/test-purchase/{runId}", "test-purchase get"),
 ];
+
+/// Endpoints that are deliberately not commands, each with the reason.
+///
+/// An explicit list rather than a silent omission: a gap should be a decision
+/// someone made, not something nobody noticed.
+pub const NOT_COMMANDS: &[(&str, &str, &str)] = &[
+    (
+        "GET",
+        "/v1/openapi.json",
+        "the spec itself — read by this coverage test, not by a command",
+    ),
+    (
+        "GET",
+        "/v1/confirmations/{id}",
+        "internal to the confirm-gated flow in confirmation.rs; polled, never invoked directly",
+    ),
+];
+
+/// Endpoints whose command group has not been built yet.
+///
+/// Kept as an explicit list so the coverage test still fails on a *new*
+/// endpoint appearing in the spec rather than silently absorbing it, and so
+/// remaining work is counted in the test output. Now empty: every endpoint
+/// the management API exposes is reachable from a command.
+pub const PENDING: &[(&str, &str, &str)] = &[];

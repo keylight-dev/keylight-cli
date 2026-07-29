@@ -1,7 +1,10 @@
 pub mod auth;
+pub mod customers;
+pub mod integrations;
 pub mod licenses;
 pub mod login;
 pub mod logout;
+pub mod misc;
 pub mod products;
 
 use crate::api::ApiClient;
