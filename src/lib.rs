@@ -18,3 +18,4 @@ pub mod error;
 pub mod http;
 pub mod output;
 pub mod sleep;
+pub mod telemetry;

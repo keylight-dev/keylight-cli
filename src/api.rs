@@ -79,6 +79,9 @@ impl ApiClient {
         let mut h = vec![
             ("Authorization".into(), format!("Bearer {}", self.token)),
             ("Content-Type".into(), "application/json".into()),
+            // The only thing distinguishing CLI traffic from an agent or raw
+            // curl on the same endpoints. See crate::telemetry.
+            ("User-Agent".into(), crate::telemetry::user_agent()),
         ];
         if let Some(id) = confirmation_id {
             h.push((CONFIRMATION_HEADER.into(), id.into()));
@@ -254,6 +257,54 @@ mod tests {
         let reqs = t.requests.lock().unwrap();
         let (_, _, headers, _) = &reqs[0];
         assert!(headers.contains(&("Authorization".to_string(), "Bearer klm_test".to_string())));
+    }
+
+    /// The server segments API traffic by client (CLI vs. agent vs. raw curl)
+    /// purely from this header — there is no other signal, and the CLI sends no
+    /// separate telemetry beacon. If it goes missing, CLI usage silently becomes
+    /// indistinguishable from anyone else hitting /v1.
+    #[test]
+    fn user_agent_header_is_sent() {
+        let t = Arc::new(ScriptedTransport::new(vec![resp(200, "{}", None)]));
+        let c = client(t.clone());
+        c.get("/v1/tokens/verify").unwrap();
+        let reqs = t.requests.lock().unwrap();
+        let (_, _, headers, _) = &reqs[0];
+
+        let ua = headers
+            .iter()
+            .find(|(k, _)| k == "User-Agent")
+            .map(|(_, v)| v.clone())
+            .expect("User-Agent must be sent on every request");
+
+        assert!(ua.starts_with("keylight-cli/"), "unexpected shape: {ua}");
+        assert!(
+            ua.contains(env!("CARGO_PKG_VERSION")),
+            "must carry the crate version: {ua}"
+        );
+    }
+
+    /// The retry leg reuses the header vec, so this guards against a future
+    /// refactor that rebuilds headers for the retry and drops the identity.
+    /// 429 rather than 5xx because that is the only status this client retries
+    /// — the management API's limiter is a per-minute token bucket, so the
+    /// policy is one wait-for-`Retry-After` retry, not a backoff loop.
+    #[test]
+    fn user_agent_survives_a_retry() {
+        let t = Arc::new(ScriptedTransport::new(vec![
+            resp(429, "{}", Some(0)),
+            resp(200, "{}", None),
+        ]));
+        let c = client(t.clone());
+        c.get("/v1/tokens/verify").unwrap();
+        let reqs = t.requests.lock().unwrap();
+        assert_eq!(reqs.len(), 2, "expected an initial call plus one retry");
+        for (_, _, headers, _) in reqs.iter() {
+            assert!(
+                headers.iter().any(|(k, _)| k == "User-Agent"),
+                "every attempt must carry the User-Agent"
+            );
+        }
     }
 
     #[test]
