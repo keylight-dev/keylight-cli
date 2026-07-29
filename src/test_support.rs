@@ -39,10 +39,9 @@ impl Transport for ScriptedTransport {
         ));
         let mut r = self.responses.lock().unwrap();
         if r.is_empty() {
-            TransportOutcome::Terminal("no scripted response".into())
-        } else {
-            r.remove(0)
+            panic!("ScriptedTransport ran out of queued responses");
         }
+        r.remove(0)
     }
 }
 

@@ -14,6 +14,7 @@ use crate::error::{CliError, Result};
 use crate::http::ureq_transport::UreqTransport;
 use crate::output::emit;
 use crate::sleep::{RealSleeper, Sleeper};
+use std::io::Write;
 use std::sync::Arc;
 
 /// Every scope except `danger`. The grant page pre-checks what is requested and
@@ -43,6 +44,26 @@ pub fn resolve_scopes(requested: Option<Vec<String>>) -> Vec<String> {
     requested.unwrap_or_else(default_scopes)
 }
 
+/// Print the code/URL/waiting-message progress lines.
+///
+/// Under `--json`, these go to `err` (stderr) rather than `out` (stdout), so
+/// stdout carries only the final JSON object `emit` writes — a caller piping
+/// stdout through `jq` must not see anything else. The URL is printed in
+/// both modes: a non-interactive caller still needs it to complete the flow,
+/// since the browser isn't auto-opened for it either.
+fn print_progress(
+    json: bool,
+    user_code: &str,
+    verify_url: &str,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) {
+    let w: &mut dyn Write = if json { err } else { out };
+    let _ = writeln!(w, "Your code: {user_code}");
+    let _ = writeln!(w, "Approve it at: {verify_url}");
+    let _ = writeln!(w, "Waiting for approval (Ctrl+C to cancel)...");
+}
+
 pub fn login(ctx: &Context, scopes: Option<Vec<String>>) -> Result<()> {
     let transport = Arc::new(UreqTransport::default());
     let sleeper: Arc<dyn Sleeper> = Arc::new(RealSleeper);
@@ -55,9 +76,13 @@ pub fn login(ctx: &Context, scopes: Option<Vec<String>>) -> Result<()> {
         .as_deref()
         .unwrap_or(&started.verification_uri);
 
-    println!("Your code: {}", started.user_code);
-    println!("Approve it at: {verify_url}");
-    println!("Waiting for approval (Ctrl+C to cancel)...");
+    print_progress(
+        ctx.json,
+        &started.user_code,
+        verify_url,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    );
 
     if !ctx.no_browser && ctx.is_tty() {
         RealOpener.open(verify_url);
@@ -116,6 +141,54 @@ mod tests {
     #[test]
     fn no_flag_falls_back_to_the_defaults() {
         assert_eq!(resolve_scopes(None), default_scopes());
+    }
+
+    // Under `--json`, stdout must carry only the final JSON object emitted by
+    // `emit` — a caller piping stdout through `jq` must not see the code/URL
+    // progress lines. They still need to go *somewhere* non-interactively, so
+    // they move to stderr rather than disappearing.
+    #[test]
+    fn json_mode_sends_progress_lines_to_stderr_not_stdout() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        print_progress(
+            true,
+            "ABCD-1234",
+            "https://app.keylight.dev/x",
+            &mut out,
+            &mut err,
+        );
+
+        assert!(
+            out.is_empty(),
+            "stdout must carry only the final JSON object under --json, got {out:?}"
+        );
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(err_str.contains("ABCD-1234"));
+        assert!(err_str.contains("https://app.keylight.dev/x"));
+    }
+
+    // The URL must still be printed in non-JSON mode too — a non-TTY caller
+    // (no browser auto-open) needs it to complete the flow.
+    #[test]
+    fn interactive_mode_sends_progress_lines_to_stdout() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        print_progress(
+            false,
+            "ABCD-1234",
+            "https://app.keylight.dev/x",
+            &mut out,
+            &mut err,
+        );
+
+        assert!(
+            err.is_empty(),
+            "nothing should go to stderr in interactive mode"
+        );
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains("ABCD-1234"));
+        assert!(out_str.contains("https://app.keylight.dev/x"));
     }
 
     // An empty --scope list is a meaningful request: a token that can only

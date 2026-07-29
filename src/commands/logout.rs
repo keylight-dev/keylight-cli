@@ -1,9 +1,10 @@
 //! `keylight logout` — removes the locally stored token.
 //!
-//! There is no server-side revocation endpoint yet (tokens are revoked from
-//! the dashboard's Settings → API tokens page today), so this is
-//! deliberately local-only and says so, rather than implying the token is
-//! dead everywhere.
+//! `POST /v1/logout` exists server-side and does revoke the calling token,
+//! but this command deliberately does not call it — it only forgets the
+//! token locally. Revoking a token server-side is done today from the
+//! dashboard's Settings → API tokens page. This is local-only by choice and
+//! says so, rather than implying the token is dead everywhere.
 
 use super::Context;
 use crate::config;

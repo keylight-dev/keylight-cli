@@ -68,15 +68,41 @@ pub fn poll_until_complete(
     sleeper: &Arc<dyn Sleeper>,
     start: &DeviceAuthStart,
 ) -> Result<PollOutcome> {
-    let interval = start.interval.max(1);
+    // Mutable: a `slow_down` response grows this per RFC 8628 §3.5. The
+    // attempt budget below is fixed at the *original* interval so a growing
+    // interval can't be used to extend the loop indefinitely.
+    let mut interval = start.interval.max(1);
     // At least one attempt even if the server sends a nonsense expires_in.
     let max_attempts = (start.expires_in / interval).max(1);
     let body = serde_json::json!({ "device_code": start.device_code });
 
     for attempt in 0..max_attempts {
-        let value = match client.call("POST", "/v1/login/device/token", Some(&body), None)? {
-            ApiOutcome::Ok { value, .. } => value,
-            ApiOutcome::Pending(_) => return Err(CliError::InvalidResponse),
+        let value = match client.call("POST", "/v1/login/device/token", Some(&body), None) {
+            Ok(ApiOutcome::Ok { value, .. }) => value,
+            Ok(ApiOutcome::Pending(_)) => return Err(CliError::InvalidResponse),
+            // The server signals expiry as a 400 `expired_token` API error
+            // (worker/src/routes/v1/login-device.ts:60), not the 200
+            // {"status":"expired"} shape handled below. This is the real
+            // shape in production.
+            Err(CliError::Api {
+                status: 400,
+                message,
+            }) if message == "expired_token" => {
+                return Ok(PollOutcome::Expired);
+            }
+            // The poll endpoint is per-IP rate limited
+            // (worker/src/routes/v1/login-device.ts:52-53) and answers
+            // `429 slow_down` when tripped — plausible with two developers
+            // behind one NAT. The user's code is still valid; back off per
+            // RFC 8628 §3.5 and keep polling instead of failing the login.
+            Err(CliError::RateLimited { .. }) => {
+                interval += 5;
+                if attempt + 1 < max_attempts {
+                    sleeper.sleep(Duration::from_secs(interval));
+                }
+                continue;
+            }
+            Err(e) => return Err(e),
         };
         let parsed: PollResponse =
             serde_json::from_value(value).map_err(|_| CliError::InvalidResponse)?;
@@ -315,9 +341,82 @@ mod tests {
         assert_eq!(slept[0], Duration::from_secs(7));
     }
 
-    // A server-side `expired` beats the local attempt budget.
+    // The poll endpoint rate-limits per IP (worker/src/routes/v1/login-device.ts:52-53,
+    // 429 "slow_down" + Retry-After: 5). Two devices behind one NAT can trip
+    // this while the user's code is still perfectly valid, so it must back
+    // off and keep polling — not die with CliError::RateLimited. Two 429s are
+    // scripted for the *first* poll attempt because ApiClient::call itself
+    // retries a 429 once before giving up and returning RateLimited.
     #[test]
-    fn poll_honors_an_expired_status_from_the_server() {
+    fn poll_backs_off_and_continues_on_slow_down_instead_of_dying() {
+        let t = Arc::new(ScriptedTransport::new(vec![
+            resp(429, r#"{"error":"slow_down"}"#, Some(5)),
+            resp(429, r#"{"error":"slow_down"}"#, Some(5)),
+            resp(
+                200,
+                r#"{"status":"approved","token":"klm_abc","scopes":[],"name":"Keylight CLI"}"#,
+                None,
+            ),
+        ]));
+        let c = ApiClient::anonymous(
+            t.clone(),
+            Arc::new(NoopSleeper::default()),
+            "https://api.test",
+        );
+        let noop = Arc::new(NoopSleeper::default());
+        let sleeper: Arc<dyn Sleeper> = noop.clone();
+
+        let out = poll_until_complete(&c, &sleeper, &start_fixture()).unwrap();
+
+        assert!(
+            matches!(out, PollOutcome::Approved { .. }),
+            "slow_down must not end the login while the code is still valid, got {out:?}"
+        );
+        assert_eq!(
+            t.requests.lock().unwrap().len(),
+            3,
+            "must keep polling after slow_down"
+        );
+
+        // `noop` is the sleeper passed to `poll_until_complete` itself, kept
+        // separate from the `ApiClient`'s own sleeper (used for its internal
+        // 429-retry wait) exactly like the other tests in this module — so
+        // this only records poll_until_complete's own backoff sleep, which
+        // must be longer than the original 1s interval, proving it grew
+        // rather than resetting.
+        let slept = noop.calls.lock().unwrap();
+        assert_eq!(slept.len(), 1, "expected exactly one backoff sleep");
+        assert!(
+            slept[0] > Duration::from_secs(start_fixture().interval),
+            "interval must grow after slow_down, got {:?}",
+            slept[0]
+        );
+    }
+
+    // The real server never sends the 200 {"status":"expired"} shape today
+    // (see worker/src/routes/v1/login-device.ts:60) — it returns a 400
+    // `expired_token` API error instead. This must resolve to a friendly
+    // `PollOutcome::Expired`, not bubble up as a raw HTTP 400.
+    #[test]
+    fn poll_honors_an_expired_token_error_from_the_server() {
+        let t = Arc::new(ScriptedTransport::new(vec![resp(
+            400,
+            r#"{"error":"expired_token"}"#,
+            None,
+        )]));
+        let c = ApiClient::anonymous(t, Arc::new(NoopSleeper::default()), "https://api.test");
+        let sleeper: Arc<dyn Sleeper> = Arc::new(NoopSleeper::default());
+
+        assert_eq!(
+            poll_until_complete(&c, &sleeper, &start_fixture()).unwrap(),
+            PollOutcome::Expired
+        );
+    }
+
+    // Keep this covered too — the server may add it later, and it's harmless
+    // to accept both shapes.
+    #[test]
+    fn poll_honors_a_200_expired_status_from_the_server() {
         let t = Arc::new(ScriptedTransport::new(vec![resp(
             200,
             r#"{"status":"expired"}"#,
