@@ -14,6 +14,7 @@ pub mod api;
 pub mod commands;
 pub mod config;
 pub mod confirmation;
+pub mod device_auth;
 pub mod error;
 pub mod http;
 pub mod output;
