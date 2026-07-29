@@ -15,9 +15,9 @@ think `wrangler`, but for your Keylight tenant: apps, key types, licenses, and p
 integrations, from the terminal instead of the dashboard.
 
 > **Status: alpha.** The management API is live (`https://api.keylight.dev/v1`, 37 endpoints —
-> see the public [OpenAPI spec](https://api.keylight.dev/v1/openapi.json)), but this CLI is
-> still the **foundation only**: auth, the HTTP core, and the confirm-gated approval flow.
-> Resource commands (`keylight apps`, `keylight licenses`, `keylight integrations`, ...) are
+> see the public [OpenAPI spec](https://api.keylight.dev/v1/openapi.json)). This CLI has
+> working browser login, the HTTP core, and the confirm-gated approval flow — but
+> resource commands (`keylight apps`, `keylight licenses`, `keylight integrations`, ...) are
 > not built yet. Expect the command tree to grow; nothing here is a stability promise.
 
 ## Install
@@ -74,19 +74,27 @@ keylight logout         # remove the local token (see note below)
 self-revocation; wiring the two together is pending (see below). To be certain a compromised
 token is dead, revoke it from the dashboard (Settings → API tokens).
 
-### `keylight login` — not working yet
+### `keylight login`
 
-**Use `keylight auth set-token` today.**
+```bash
+keylight login
+```
 
-The server side shipped, but as a different flow than this client was built against. Keylight
-implements [RFC 8628 device authorization](https://datatracker.ietf.org/doc/html/rfc8628) —
-`POST /v1/login/device` returns a short user code, you approve it in the browser at
-`https://app.keylight.dev/login/device`, and the CLI polls `POST /v1/login/device/token` until
-it's granted. That works anywhere, including headless boxes and over SSH.
+Prints a short code, opens your browser to approve it, and stores the token when
+you do. Uses [RFC 8628 device authorization](https://datatracker.ietf.org/doc/html/rfc8628),
+so it works over SSH and on headless machines — the browser never needs to reach
+the CLI.
 
-The `login` command in this repo still implements the earlier *loopback callback* design (a
-localhost listener waiting for a browser redirect), so it will hang and time out. Rewriting it
-against the device flow is the next piece of work.
+Requests every non-destructive permission by default. Narrow it with `--scope`,
+repeated:
+
+```bash
+keylight login --scope licenses:read --scope usage:read
+```
+
+You can also uncheck permissions on the approval page itself. `danger`
+(destructive operations) is never requested by default and must be opted into
+on that page.
 
 ## `--json`
 
