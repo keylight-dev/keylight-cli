@@ -49,6 +49,27 @@ pub enum ApiOutcome {
     Pending(PendingConfirmation),
 }
 
+/// The same outcome with the success body left as received. Only
+/// `GET /v1/licenses/export` needs this — it answers `text/csv`, which the
+/// JSON parse in [`ApiClient::call`] would reject as `InvalidResponse`.
+#[derive(Debug)]
+pub enum RawOutcome {
+    Ok(String),
+    Pending(PendingConfirmation),
+}
+
+/// A request that reached a verdict: either a success body (whatever its
+/// content type) or a pending confirmation. Retries, the `{"error": ...}`
+/// envelope and rate limiting are already resolved by the time one exists,
+/// so the JSON and raw entry points share all of that rather than forking it.
+enum Settled {
+    Body {
+        body: String,
+        retry_after: Option<u64>,
+    },
+    Pending(PendingConfirmation),
+}
+
 pub struct ApiClient {
     transport: Arc<dyn Transport>,
     sleeper: Arc<dyn Sleeper>,
@@ -118,6 +139,42 @@ impl ApiClient {
         body: Option<&serde_json::Value>,
         confirmation_id: Option<&str>,
     ) -> Result<ApiOutcome> {
+        match self.settle(method, path, body, confirmation_id)? {
+            Settled::Pending(p) => Ok(ApiOutcome::Pending(p)),
+            Settled::Body { body, retry_after } => {
+                let value = if body.trim().is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::from_str(&body).map_err(|_| CliError::InvalidResponse)?
+                };
+                Ok(ApiOutcome::Ok { value, retry_after })
+            }
+        }
+    }
+
+    /// As [`ApiClient::call`], but hands back the success body verbatim
+    /// instead of parsing it. For `text/csv` responses, where a JSON parse
+    /// would be wrong rather than merely wasteful.
+    pub fn call_raw(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        confirmation_id: Option<&str>,
+    ) -> Result<RawOutcome> {
+        match self.settle(method, path, body, confirmation_id)? {
+            Settled::Pending(p) => Ok(RawOutcome::Pending(p)),
+            Settled::Body { body, .. } => Ok(RawOutcome::Ok(body)),
+        }
+    }
+
+    fn settle(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        confirmation_id: Option<&str>,
+    ) -> Result<Settled> {
         let url = self.url(path);
         let headers = self.headers(confirmation_id);
         let body_str = body.map(|b| b.to_string());
@@ -135,24 +192,17 @@ impl ApiClient {
         headers: &[(String, String)],
         body: Option<&str>,
         attempt: u32,
-    ) -> Result<ApiOutcome> {
+    ) -> Result<Settled> {
         match outcome {
             TransportOutcome::Response(r) if r.status == 202 => {
                 let env: ConfirmationEnvelope =
                     serde_json::from_str(&r.body).map_err(|_| CliError::InvalidResponse)?;
-                Ok(ApiOutcome::Pending(env.confirmation))
+                Ok(Settled::Pending(env.confirmation))
             }
-            TransportOutcome::Response(r) if (200..300).contains(&r.status) => {
-                let value = if r.body.trim().is_empty() {
-                    serde_json::Value::Null
-                } else {
-                    serde_json::from_str(&r.body).map_err(|_| CliError::InvalidResponse)?
-                };
-                Ok(ApiOutcome::Ok {
-                    value,
-                    retry_after: r.retry_after,
-                })
-            }
+            TransportOutcome::Response(r) if (200..300).contains(&r.status) => Ok(Settled::Body {
+                body: r.body,
+                retry_after: r.retry_after,
+            }),
             TransportOutcome::Response(r) if r.status == 429 && attempt == 1 => {
                 // Single retry, honoring the server's Retry-After (defaulting to
                 // 1s if it sent none — never busy-loop on a 429).

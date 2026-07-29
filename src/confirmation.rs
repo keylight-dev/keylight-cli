@@ -17,7 +17,7 @@
 //! unit-testable against a scripted mock transport, no real browser or
 //! sleep involved.
 
-use crate::api::{ApiClient, ApiOutcome, PendingConfirmation};
+use crate::api::{ApiClient, ApiOutcome, PendingConfirmation, RawOutcome};
 use crate::error::{CliError, Result};
 use crate::sleep::Sleeper;
 use std::time::Duration;
@@ -56,6 +56,15 @@ pub struct ConfirmOptions<'a> {
     pub max_polls: Option<u32>,
 }
 
+/// One leg of a gated call: either the endpoint answered, or it wants a
+/// confirmation first. Lets the JSON and raw entry points share one copy of
+/// the state machine instead of forking it — the CSV export is gated by the
+/// same middleware as every other tier-2 operation.
+enum Step<T> {
+    Done(T),
+    Gated(PendingConfirmation),
+}
+
 /// Run `method path body`, transparently walking the confirm-gated flow if
 /// the server responds `202`. Returns the eventual success body.
 pub fn run_confirmable(
@@ -65,21 +74,54 @@ pub fn run_confirmable(
     body: Option<&serde_json::Value>,
     opts: &ConfirmOptions,
 ) -> Result<serde_json::Value> {
-    match client.call(method, path, body, None)? {
-        ApiOutcome::Ok { value, .. } => Ok(value),
-        ApiOutcome::Pending(pending) => {
+    drive(client, opts, |confirmation_id| {
+        Ok(match client.call(method, path, body, confirmation_id)? {
+            ApiOutcome::Ok { value, .. } => Step::Done(value),
+            ApiOutcome::Pending(p) => Step::Gated(p),
+        })
+    })
+}
+
+/// As [`run_confirmable`], but hands back the success body verbatim.
+/// `GET /v1/licenses/export` answers `text/csv`, which a JSON parse would
+/// reject as an invalid response.
+pub fn run_confirmable_raw(
+    client: &ApiClient,
+    method: &str,
+    path: &str,
+    body: Option<&serde_json::Value>,
+    opts: &ConfirmOptions,
+) -> Result<String> {
+    drive(client, opts, |confirmation_id| {
+        Ok(
+            match client.call_raw(method, path, body, confirmation_id)? {
+                RawOutcome::Ok(text) => Step::Done(text),
+                RawOutcome::Pending(p) => Step::Gated(p),
+            },
+        )
+    })
+}
+
+fn drive<T>(
+    client: &ApiClient,
+    opts: &ConfirmOptions,
+    mut call: impl FnMut(Option<&str>) -> Result<Step<T>>,
+) -> Result<T> {
+    match call(None)? {
+        Step::Done(v) => Ok(v),
+        Step::Gated(pending) => {
             (opts.on_pending)(&pending);
             if !opts.no_browser && opts.is_tty {
                 opts.opener.open(&pending.approve_url);
             }
             wait_for_approval(client, &pending, opts)?;
-            match client.call(method, path, body, Some(&pending.id))? {
-                ApiOutcome::Ok { value, .. } => Ok(value),
+            match call(Some(&pending.id))? {
+                Step::Done(v) => Ok(v),
                 // A server that re-pends a call carrying a just-consumed
                 // confirmation id is misbehaving relative to the design spec
                 // (consumption is atomic and single-use); surface that as an
                 // invalid-response condition rather than looping forever.
-                ApiOutcome::Pending(_) => Err(CliError::InvalidResponse),
+                Step::Gated(_) => Err(CliError::InvalidResponse),
             }
         }
     }
@@ -129,49 +171,9 @@ fn wait_for_approval(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::{HttpResponse, Transport, TransportOutcome};
     use crate::sleep::NoopSleeper;
+    use crate::test_support::{ScriptedTransport, resp};
     use std::sync::{Arc, Mutex};
-
-    /// A recorded request: method, url, headers.
-    type RecordedRequest = (String, String, Vec<(String, String)>);
-
-    struct ScriptedTransport {
-        responses: Mutex<Vec<TransportOutcome>>,
-        requests: Mutex<Vec<RecordedRequest>>,
-    }
-    impl ScriptedTransport {
-        fn new(responses: Vec<TransportOutcome>) -> Self {
-            Self {
-                responses: Mutex::new(responses),
-                requests: Mutex::new(Vec::new()),
-            }
-        }
-    }
-    impl Transport for ScriptedTransport {
-        fn request(
-            &self,
-            method: &str,
-            url: &str,
-            headers: &[(String, String)],
-            _body: Option<&str>,
-        ) -> TransportOutcome {
-            self.requests.lock().unwrap().push((
-                method.to_string(),
-                url.to_string(),
-                headers.to_vec(),
-            ));
-            self.responses.lock().unwrap().remove(0)
-        }
-    }
-
-    fn resp(status: u16, body: &str, retry_after: Option<u64>) -> TransportOutcome {
-        TransportOutcome::Response(HttpResponse {
-            status,
-            body: body.into(),
-            retry_after,
-        })
-    }
 
     struct RecordingOpener {
         opened: Mutex<Vec<String>>,
@@ -259,7 +261,7 @@ mod tests {
         );
         // Final retried call carried the confirmation header.
         let reqs = t.requests.lock().unwrap();
-        let (_, _, last_headers) = reqs.last().unwrap();
+        let (_, _, last_headers, _) = reqs.last().unwrap();
         assert!(last_headers.contains(&(
             crate::api::CONFIRMATION_HEADER.to_string(),
             "conf1".to_string()
