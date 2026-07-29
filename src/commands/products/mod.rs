@@ -309,12 +309,16 @@ fn free_tier(
         &format!("/v1/products/{product_id}/free-tier"),
         Some(&body),
     )?;
+    // The route answers `{product}`, so show the resulting state rather than
+    // a bare success line — the human sees what changed and an agent doesn't
+    // need a second call to find out.
     emit(ctx.json, &value, |v| {
         println!(
             "Free tier {} for {product_id}.",
             if on { "enabled" } else { "disabled" }
         );
-        let _ = v;
+        println!();
+        print_product(v);
     });
     Ok(())
 }
@@ -341,8 +345,10 @@ fn test_mode_enable(
         &format!("/v1/products/{product_id}/test-mode"),
         Some(&body),
     )?;
-    emit(ctx.json, &value, |_| {
+    emit(ctx.json, &value, |v| {
         println!("Test mode enabled for {product_id}.");
+        println!();
+        print_product(v);
     });
     Ok(())
 }
@@ -357,8 +363,10 @@ fn test_mode_disable(ctx: &Context, deps: &Deps, product_id: &str) -> Result<()>
         &format!("/v1/products/{product_id}/test-mode"),
         None,
     )?;
-    emit(ctx.json, &value, |_| {
+    emit(ctx.json, &value, |v| {
         println!("Test mode disabled for {product_id}.");
+        println!();
+        print_product(v);
     });
     Ok(())
 }
@@ -398,8 +406,15 @@ fn integrations_set(
         &format!("/v1/products/{product_id}/integrations/{provider}"),
         Some(&body),
     )?;
-    emit(ctx.json, &value, |_| {
-        println!("Updated {provider} for {product_id}.");
+    // Answers {productId, provider, enabled, mappedPrices} — the mapped-price
+    // count is the whole reason to run this, so print it.
+    emit(ctx.json, &value, |v| {
+        output::kv(&[
+            ("App", output::cell(v.get("productId"))),
+            ("Provider", output::cell(v.get("provider"))),
+            ("Enabled", output::cell(v.get("enabled"))),
+            ("Mapped prices", output::cell(v.get("mappedPrices"))),
+        ]);
     });
     Ok(())
 }

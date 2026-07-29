@@ -102,8 +102,15 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: CustomersCommand) -> Result<()> {
                     &format!("/v1/customers/{customer_id}/entitlements"),
                     Some(&body),
                 )?;
-                emit(ctx.json, &value, |_| {
-                    println!("Entitlements updated.");
+                // Answers {entitlements, overridden, keyTypeDefault, license}
+                // — "overridden" is the thing worth seeing: it says whether
+                // this license now diverges from its key type's default.
+                emit(ctx.json, &value, |v| {
+                    output::kv(&[
+                        ("Entitlements", output::cell(v.get("entitlements"))),
+                        ("Overridden", output::cell(v.get("overridden"))),
+                        ("Key type default", output::cell(v.get("keyTypeDefault"))),
+                    ]);
                 });
                 Ok(())
             }
@@ -122,8 +129,16 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: CustomersCommand) -> Result<()> {
                 &format!("/v1/customers/{customer_id}/link-license"),
                 Some(&body),
             )?;
-            emit(ctx.json, &value, |_| {
+            emit(ctx.json, &value, |v| {
                 println!("Linked {license_id} to {customer_id}.");
+                if let Some(l) = v.get("license") {
+                    println!();
+                    output::kv(&[
+                        ("Key", output::cell(l.get("displayKey"))),
+                        ("App", output::cell(l.get("productId"))),
+                        ("Status", output::cell(l.get("status"))),
+                    ]);
+                }
             });
             Ok(())
         }

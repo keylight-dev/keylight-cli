@@ -56,28 +56,31 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: IntegrationsCommand) -> Result<()> {
         IntegrationsCommand::List => {
             let client = ctx.client(deps)?;
             let value = run_gated(ctx, deps, &client, "GET", "/v1/integrations", None)?;
+            // Answers {providers: [ProviderStatus], stripe: StripeConnectStatus}
+            // — NOT a bare array, and not keyed "integrations".
             emit(ctx.json, &value, |v| {
-                let items = v
-                    .get("integrations")
-                    .and_then(|i| i.as_array())
-                    .or_else(|| v.as_array());
-                match items {
-                    Some(items) if !items.is_empty() => {
-                        let rows: Vec<Vec<String>> = items
-                            .iter()
-                            .map(|i| {
-                                vec![
-                                    output::cell(i.get("provider")),
-                                    output::cell(i.get("connected")),
-                                    output::cell(i.get("environment")),
-                                ]
-                            })
-                            .collect();
-                        output::table(&["PROVIDER", "CONNECTED", "ENVIRONMENT"], &rows);
-                    }
-                    // The overview is an object keyed by provider on some
-                    // deployments; print it rather than claiming emptiness.
-                    _ => output::kv(&[("Integrations", v.to_string())]),
+                let rows = provider_rows(v);
+                if rows.is_empty() {
+                    output::empty(
+                        "No providers configured. Connect one with: \
+                         keylight integrations connect <provider>",
+                    );
+                } else {
+                    output::table(&["PROVIDER", "LABEL", "CONNECTED", "PRICES"], &rows);
+                }
+                if let Some(st) = v.get("stripe") {
+                    println!();
+                    output::kv(&[
+                        ("Stripe connected", output::cell(st.get("connected"))),
+                        (
+                            "Stripe live",
+                            output::cell(st.get("live").and_then(|l| l.get("accountId"))),
+                        ),
+                        (
+                            "Stripe sandbox",
+                            output::cell(st.get("sandbox").and_then(|l| l.get("accountId"))),
+                        ),
+                    ]);
                 }
             });
             Ok(())
@@ -92,12 +95,18 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: IntegrationsCommand) -> Result<()> {
                 "/v1/integrations/stripe/status",
                 None,
             )?;
+            // StripeConnectStatus is {connected, live, sandbox, products},
+            // where live/sandbox are each {connected, accountId}. There is no
+            // flat accountId/mode/chargesEnabled.
             emit(ctx.json, &value, |v| {
+                let slot = |k: &str, f: &str| output::cell(v.get(k).and_then(|s| s.get(f)));
                 output::kv(&[
                     ("Connected", output::cell(v.get("connected"))),
-                    ("Account", output::cell(v.get("accountId"))),
-                    ("Mode", output::cell(v.get("mode"))),
-                    ("Charges enabled", output::cell(v.get("chargesEnabled"))),
+                    ("Live account", slot("live", "accountId")),
+                    ("Live connected", slot("live", "connected")),
+                    ("Sandbox account", slot("sandbox", "accountId")),
+                    ("Sandbox connected", slot("sandbox", "connected")),
+                    ("Apps", output::cell(v.get("products"))),
                 ]);
             });
             Ok(())
@@ -129,8 +138,13 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: IntegrationsCommand) -> Result<()> {
                 &[("environment", environment)],
             );
             let value = run_gated(ctx, deps, &client, "DELETE", &path, None)?;
-            emit(ctx.json, &value, |_| {
+            emit(ctx.json, &value, |v| {
                 println!("Disconnected {provider}.");
+                // remainingEnvironments matters: disconnecting sandbox leaves
+                // live connected, and silence there reads as "all gone".
+                if let Some(rest) = v.get("remainingEnvironments") {
+                    output::kv(&[("Still connected", output::cell(Some(rest)))]);
+                }
             });
             Ok(())
         }
@@ -144,16 +158,40 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: IntegrationsCommand) -> Result<()> {
                 &format!("/v1/integrations/{provider}/rotate-secret"),
                 None,
             )?;
+            // Answers {rotated, provider, pingUrl}. The secret itself is
+            // never returned — the provider is reconfigured server-side, and
+            // pingUrl is how you confirm delivery still works.
             emit(ctx.json, &value, |v| {
                 println!("Rotated the {provider} webhook secret.");
-                if let Some(s) = v.get("webhookSecret").and_then(|s| s.as_str()) {
-                    println!("New signing secret: {s}");
-                    println!("Update it at your provider before the next webhook fires.");
+                if let Some(u) = v.get("pingUrl").and_then(|u| u.as_str()) {
+                    println!("Verify delivery at: {u}");
                 }
             });
             Ok(())
         }
     }
+}
+
+/// Pulled out of the renderer so the field names can be asserted. The
+/// overview answers `{providers, stripe}` — not a bare array, and not keyed
+/// `integrations`, which is what the first version of this command looked for.
+fn provider_rows(v: &serde_json::Value) -> Vec<Vec<String>> {
+    v.get("providers")
+        .and_then(|p| p.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|i| {
+                    vec![
+                        output::cell(i.get("provider")),
+                        output::cell(i.get("label")),
+                        output::cell(i.get("connected")),
+                        output::cell(i.get("mappedPrices")),
+                    ]
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -229,6 +267,33 @@ mod tests {
         let r = run(&c, &d, cmd);
         cleanup(&c);
         r
+    }
+
+    /// Field names from `ProviderStatus` in the spec. A renderer reading
+    /// invented names still prints a well-formed table of dashes, which no
+    /// request-shape test can see.
+    #[test]
+    fn provider_rows_read_the_field_names_the_api_actually_returns() {
+        let body = serde_json::json!({
+            "providers": [
+                {"provider": "stripe", "label": "Stripe", "connected": true, "mappedPrices": 3}
+            ],
+            "stripe": {"connected": true, "live": {"connected": true, "accountId": "acct_1"}}
+        });
+        let rows = provider_rows(&body);
+        assert_eq!(rows, vec![vec!["stripe", "Stripe", "true", "3"]]);
+        assert!(!rows[0].iter().any(|c| c == "-"));
+    }
+
+    /// The overview is an object, never a bare array — reading it as one
+    /// yields nothing, which is the bug this replaced.
+    #[test]
+    fn a_bare_array_is_not_the_overview_shape() {
+        let body = serde_json::json!([{"provider": "stripe"}]);
+        assert!(
+            provider_rows(&body).is_empty(),
+            "GET /v1/integrations answers {{providers, stripe}}, not an array"
+        );
     }
 
     /// Stripe has its own path. Routing it through the generic

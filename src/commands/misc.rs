@@ -64,9 +64,13 @@ pub fn run_webhook(ctx: &Context, deps: &Deps, cmd: WebhookCommand) -> Result<()
     match cmd {
         WebhookCommand::Get => {
             let value = run_gated(ctx, deps, &client, "GET", "/v1/webhook", None)?;
+            // WebhookSettings is {url, hasSigningSecret, disableCustomerEmail,
+            // events}. The secret itself is never returned on a read — only
+            // whether one exists.
             emit(ctx.json, &value, |v| {
                 output::kv(&[
                     ("URL", output::cell(v.get("url"))),
+                    ("Signing secret", output::cell(v.get("hasSigningSecret"))),
                     (
                         "Customer email",
                         match v.get("disableCustomerEmail").and_then(|d| d.as_bool()) {
@@ -74,6 +78,7 @@ pub fn run_webhook(ctx: &Context, deps: &Deps, cmd: WebhookCommand) -> Result<()
                             _ => "enabled".into(),
                         },
                     ),
+                    ("Events", output::cell(v.get("events"))),
                 ]);
             });
             Ok(())
@@ -100,11 +105,19 @@ pub fn run_webhook(ctx: &Context, deps: &Deps, cmd: WebhookCommand) -> Result<()
                 ("events", parse_json_flag(events, "--events")?),
             ]);
             let value = run_gated(ctx, deps, &client, "PUT", "/v1/webhook", Some(&body))?;
-            emit(ctx.json, &value, |_| {
+            emit(ctx.json, &value, |v| {
                 if url.is_empty() {
                     println!("Webhook cleared. Nothing will be delivered.");
-                } else {
-                    println!("Webhook set to {url}.");
+                    return;
+                }
+                println!("Webhook set to {url}.");
+                // Unlike the read, the update DOES return the signing secret.
+                // Not printing it would mean the caller cannot verify
+                // signatures on the very deliveries they just enabled.
+                if let Some(sec) = v.get("signingSecret").and_then(|s| s.as_str()) {
+                    println!();
+                    println!("Signing secret: {sec}");
+                    println!("Use it to verify the signature on every delivery.");
                 }
             });
             Ok(())
@@ -119,32 +132,52 @@ pub fn run_usage(ctx: &Context, deps: &Deps, days: Option<u32>) -> Result<()> {
     let path = query_path("/v1/usage", &[("days", days.map(|d| d.to_string()))]);
     let value = run_gated(ctx, deps, &client, "GET", &path, None)?;
     emit(ctx.json, &value, |v| {
-        match v.get("days").and_then(|d| d.as_array()) {
-            Some(rows) if !rows.is_empty() => {
-                let table_rows: Vec<Vec<String>> = rows
-                    .iter()
-                    .map(|d| {
-                        vec![
-                            output::cell(d.get("date")),
-                            output::cell(d.get("activations")),
-                            output::cell(d.get("validations")),
-                            output::cell(d.get("devices")),
-                        ]
-                    })
-                    .collect();
-                output::table(
-                    &["DATE", "ACTIVATIONS", "VALIDATIONS", "DEVICES"],
-                    &table_rows,
-                );
-            }
-            _ => output::kv(&[
-                ("Activations", output::cell(v.get("activations"))),
-                ("Validations", output::cell(v.get("validations"))),
-                ("Devices", output::cell(v.get("devices"))),
-            ]),
+        // UsageDay is {day, activations, validations, activeDevices, mau};
+        // the response also carries a summary object. The field is `day`, not
+        // `date`, and `activeDevices`, not `devices`.
+        if let Some(sum) = v.get("summary") {
+            output::kv(&[
+                ("Active devices", output::cell(sum.get("activeDevices"))),
+                ("Monthly active", output::cell(sum.get("mau"))),
+                ("Activations (7d)", output::cell(sum.get("activations7d"))),
+                ("Validations (7d)", output::cell(sum.get("validations7d"))),
+            ]);
+            println!();
+        }
+        let table_rows = usage_rows(v);
+        if table_rows.is_empty() {
+            output::empty("No usage recorded in this window.");
+        } else {
+            output::table(
+                &["DAY", "ACTIVATIONS", "VALIDATIONS", "DEVICES", "MAU"],
+                &table_rows,
+            );
         }
     });
     Ok(())
+}
+
+/// Pulled out of the renderer so the field names can be asserted directly.
+/// The whole class of bug this guards is reading a field the API does not
+/// have: `output::cell` answers `-` for a missing key, so a renderer built on
+/// guessed names still prints a well-formed, entirely empty table.
+fn usage_rows(v: &serde_json::Value) -> Vec<Vec<String>> {
+    v.get("days")
+        .and_then(|d| d.as_array())
+        .map(|rows| {
+            rows.iter()
+                .map(|d| {
+                    vec![
+                        output::cell(d.get("day")),
+                        output::cell(d.get("activations")),
+                        output::cell(d.get("validations")),
+                        output::cell(d.get("activeDevices")),
+                        output::cell(d.get("mau")),
+                    ]
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ---- test-purchase ------------------------------------------------------
@@ -204,6 +237,48 @@ mod tests {
     use super::*;
     use crate::commands::testing::{RecordingOpener, cleanup, ctx, deps, request_at, transport};
     use crate::test_support::resp;
+
+    /// A renderer built on guessed field names still prints a well-formed
+    /// table — every cell just reads `-`. Request-shape tests cannot see
+    /// that, which is how the first version of this command shipped reading
+    /// `date`/`devices` when `UsageDay` actually has `day`/`activeDevices`.
+    ///
+    /// The body below uses the field names from `UsageDay` in the spec.
+    #[test]
+    fn usage_rows_read_the_field_names_the_api_actually_returns() {
+        let body = serde_json::json!({
+            "days": [{
+                "day": "2026-07-28",
+                "activations": 12,
+                "validations": 340,
+                "activeDevices": 9,
+                "mau": 7
+            }],
+            "summary": {"activeDevices": 9, "mau": 7, "activations7d": 40, "validations7d": 900}
+        });
+        let rows = usage_rows(&body);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], vec!["2026-07-28", "12", "340", "9", "7"]);
+        assert!(
+            !rows[0].iter().any(|c| c == "-"),
+            "a `-` means the renderer read a field the API does not return: {:?}",
+            rows[0]
+        );
+    }
+
+    /// The inverse: the field names that were wrong must NOT resolve, so this
+    /// test fails loudly if someone reintroduces them.
+    #[test]
+    fn the_old_guessed_usage_field_names_resolve_to_nothing() {
+        let body = serde_json::json!({"days": [{"date": "2026-07-28", "devices": 9}]});
+        let rows = usage_rows(&body);
+        assert!(
+            rows[0].iter().all(|c| c == "-"),
+            "`date`/`devices` are not fields of UsageDay; if this passes with \
+             real values the schema changed: {:?}",
+            rows[0]
+        );
+    }
 
     /// Reading the SDK key is confirm-gated, exactly like rotating it —
     /// a read that hands over a live credential is a tier-2 operation.

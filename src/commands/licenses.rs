@@ -3,9 +3,10 @@
 //! The largest group, and the first to exercise both confirm-gated paths:
 //! `revoke` returns JSON, `export` returns `text/csv`.
 //!
-//! The raw key is never in an API response — only `displayKey`, the masked
-//! form — so no command here can print one. `create` and `remint` are the
-//! only ways a key reaches a customer, and that happens by email.
+//! Lists and detail views carry only `displayKey`, the masked form. There is
+//! exactly one exception: `remint` answers with `licenseKey`, the plaintext
+//! replacement — **returned once**, never again. `remint` therefore prints it,
+//! because a caller who doesn't capture it there has lost it permanently.
 
 use super::{Context, Deps, json_body, query_path, run_gated, run_gated_raw};
 use crate::api::ApiOutcome;
@@ -139,8 +140,10 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: LicensesCommand) -> Result<()> {
                 &format!("/v1/licenses/{license_id}/revoke"),
                 None,
             )?;
-            emit(ctx.json, &value, |_| {
-                println!("Revoked {license_id}. Devices lose access at their next check-in.");
+            emit(ctx.json, &value, |v| {
+                println!("Revoked. Devices lose access at their next check-in.");
+                println!();
+                print_license(v);
             });
             Ok(())
         }
@@ -158,7 +161,17 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: LicensesCommand) -> Result<()> {
                 &format!("/v1/licenses/{license_id}/remint"),
                 Some(&body),
             )?;
-            emit(ctx.json, &value, print_license);
+            emit(ctx.json, &value, |v| {
+                // The one place a plaintext key appears. The spec is explicit
+                // that it is "returned once" — not printing it here would
+                // lose the new key permanently, which defeats the command.
+                if let Some(key) = v.get("licenseKey").and_then(|k| k.as_str()) {
+                    println!("New key: {key}");
+                    println!("This is the only time it is shown. Save it now.");
+                    println!();
+                }
+                print_license(v);
+            });
             Ok(())
         }
         LicensesCommand::DeactivateDevice {
@@ -175,8 +188,10 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: LicensesCommand) -> Result<()> {
                 &format!("/v1/licenses/{license_id}/deactivate-device"),
                 Some(&body),
             )?;
-            emit(ctx.json, &value, |_| {
+            emit(ctx.json, &value, |v| {
                 println!("Device removed. The seat is free.");
+                println!();
+                print_license(v);
             });
             Ok(())
         }
@@ -365,6 +380,9 @@ fn export(ctx: &Context, deps: &Deps, output_path: Option<String>) -> Result<()>
     Ok(())
 }
 
+/// Renders either a bare license object or one wrapped as `{license: {...}}`
+/// — `revoke`, `remint` and `deactivate-device` all answer with the wrapper
+/// alongside a status flag.
 fn print_license(v: &serde_json::Value) {
     let l = v.get("license").unwrap_or(v);
     output::kv(&[
