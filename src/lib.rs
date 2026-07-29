@@ -19,3 +19,5 @@ pub mod http;
 pub mod output;
 pub mod sleep;
 pub mod telemetry;
+#[cfg(test)]
+pub mod test_support;

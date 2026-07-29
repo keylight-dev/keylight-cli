@@ -190,57 +190,8 @@ impl ApiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::HttpResponse;
     use crate::sleep::NoopSleeper;
-    use std::sync::Mutex;
-
-    /// A recorded request: method, url, headers, body.
-    type RecordedRequest = (String, String, Vec<(String, String)>, Option<String>);
-
-    /// Scripted transport: returns queued responses in order, and records
-    /// every request it received (method/url/headers/body) for assertions —
-    /// same shape as the SDK's `CapturingOk`/`FlakyTransport` test doubles.
-    struct ScriptedTransport {
-        responses: Mutex<Vec<TransportOutcome>>,
-        requests: Mutex<Vec<RecordedRequest>>,
-    }
-    impl ScriptedTransport {
-        fn new(responses: Vec<TransportOutcome>) -> Self {
-            Self {
-                responses: Mutex::new(responses),
-                requests: Mutex::new(Vec::new()),
-            }
-        }
-    }
-    impl Transport for ScriptedTransport {
-        fn request(
-            &self,
-            method: &str,
-            url: &str,
-            headers: &[(String, String)],
-            body: Option<&str>,
-        ) -> TransportOutcome {
-            self.requests.lock().unwrap().push((
-                method.to_string(),
-                url.to_string(),
-                headers.to_vec(),
-                body.map(|s| s.to_string()),
-            ));
-            let mut responses = self.responses.lock().unwrap();
-            if responses.is_empty() {
-                panic!("ScriptedTransport ran out of queued responses");
-            }
-            responses.remove(0)
-        }
-    }
-
-    fn resp(status: u16, body: &str, retry_after: Option<u64>) -> TransportOutcome {
-        TransportOutcome::Response(HttpResponse {
-            status,
-            body: body.into(),
-            retry_after,
-        })
-    }
+    use crate::test_support::{ScriptedTransport, resp};
 
     fn client(transport: Arc<ScriptedTransport>) -> ApiClient {
         ApiClient::new(
