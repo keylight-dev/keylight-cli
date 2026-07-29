@@ -1,16 +1,16 @@
 # Keylight CLI
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 The open-source command-line client for the [Keylight](https://keylight.dev) management API —
 think `wrangler`, but for your Keylight tenant: apps, key types, licenses, and payment
 integrations, from the terminal instead of the dashboard.
 
-> **Status: alpha.** The management API this CLI talks to is still being built out
-> (`https://api.keylight.dev/v1`). This release is the **foundation only** — auth, the HTTP
-> core, and the confirm-gated approval flow. Resource commands (`keylight apps`, `keylight
-> licenses`, `keylight integrations`, ...) land as the API surface ships. Expect the command
-> tree to grow; nothing here is a stability promise yet.
+> **Status: alpha.** The management API is live (`https://api.keylight.dev/v1`, 37 endpoints —
+> see the public [OpenAPI spec](https://api.keylight.dev/v1/openapi.json)), but this CLI is
+> still the **foundation only**: auth, the HTTP core, and the confirm-gated approval flow.
+> Resource commands (`keylight apps`, `keylight licenses`, `keylight integrations`, ...) are
+> not built yet. Expect the command tree to grow; nothing here is a stability promise.
 
 ## Install
 
@@ -62,17 +62,23 @@ keylight auth status   # who am I: tenant, token name, scopes
 keylight logout         # remove the local token (see note below)
 ```
 
-`keylight logout` only removes the **local** copy. There's no server-side revocation endpoint
-yet — revoke a compromised token from the dashboard (Settings → API tokens) as well.
+`keylight logout` removes the local copy. The server also exposes `POST /v1/logout` for
+self-revocation; wiring the two together is pending (see below). To be certain a compromised
+token is dead, revoke it from the dashboard (Settings → API tokens).
 
-### `keylight login` (browser flow) — not live yet
+### `keylight login` — not working yet
 
-The design is a `wrangler login`-style flow: the CLI starts a localhost callback listener,
-opens your browser to a dashboard grant page, and the page mints a scoped token and posts it
-back to the CLI. **The dashboard grant page doesn't exist yet.** Running `keylight login` today
-will wait for a callback that never arrives and time out with a message pointing you at `auth
-set-token`. The client side is fully wired up — only the URL it opens needs to change once the
-grant page ships.
+**Use `keylight auth set-token` today.**
+
+The server side shipped, but as a different flow than this client was built against. Keylight
+implements [RFC 8628 device authorization](https://datatracker.ietf.org/doc/html/rfc8628) —
+`POST /v1/login/device` returns a short user code, you approve it in the browser at
+`https://app.keylight.dev/login/device`, and the CLI polls `POST /v1/login/device/token` until
+it's granted. That works anywhere, including headless boxes and over SSH.
+
+The `login` command in this repo still implements the earlier *loopback callback* design (a
+localhost listener waiting for a browser redirect), so it will hang and time out. Rewriting it
+against the device flow is the next piece of work.
 
 ## `--json`
 

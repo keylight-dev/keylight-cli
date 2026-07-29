@@ -1,19 +1,31 @@
 //! `keylight login` — browser-based auth.
 //!
-//! **Status: the server side does not exist yet.** There is no dashboard
-//! grant page and no callback contract live at `app.keylight.dev` today
-//! (design spec: "Phase 3 ... the grant page + callback contract are
-//! worker-side (built alongside this phase)"). This command is wired up so
-//! it becomes real the moment that page ships — only [`grant_url`] should
-//! need to change — but until then it will always time out waiting for a
-//! callback that nothing will ever send, and says so clearly rather than
-//! hanging silently. `keylight auth set-token` is the working path today.
+//! **Status: this implementation targets a design that was not the one
+//! shipped. It does not work.** `keylight auth set-token` is the working
+//! path today.
 //!
-//! Flow once the server side exists: start a localhost callback listener on
-//! an ephemeral port, open the browser to the dashboard grant page with
-//! `?cli_callback=http://127.0.0.1:<port>/callback`, and wait for the page
-//! to mint a scoped token and redirect the browser to that callback with
-//! `?token=klm_...`.
+//! What is below is the *loopback callback* flow: bind a localhost listener
+//! on an ephemeral port, open the browser to a dashboard grant page with
+//! `?cli_callback=http://127.0.0.1:<port>/callback`, and wait for that page
+//! to redirect back with `?token=klm_...`. Nothing serves that contract, so
+//! it will wait out [`CALLBACK_TIMEOUT`] and fail.
+//!
+//! What actually shipped (and is live) is **RFC 8628 device authorization**,
+//! chosen over loopback because the CLI has to work on headless boxes and
+//! over SSH, where a browser cannot reach the CLI's localhost:
+//!
+//! 1. `POST /v1/login/device` `{scopes}` → `{device_code, user_code,
+//!    verification_uri, interval, expires_in}`
+//! 2. Show the user `user_code`; open `verification_uri`
+//!    (`https://app.keylight.dev/login/device`) for them to approve
+//! 3. Poll `POST /v1/login/device/token` `{device_code}` every `interval`
+//!    seconds → `{"status":"pending"}` until granted, then the token ONCE
+//! 4. Persist via [`crate::config`], same as `auth set-token`
+//!
+//! Rewriting this module against those three endpoints is the remaining
+//! work. Note the loopback listener, port handling and browser-opening below
+//! are NOT reusable for it — the device flow needs no local listener at all.
+//! Keep [`Opener`] and the config write; drop the rest.
 
 use super::Context;
 use crate::config::{self, ConfigFile};
