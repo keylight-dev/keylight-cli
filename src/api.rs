@@ -53,7 +53,7 @@ pub struct ApiClient {
     transport: Arc<dyn Transport>,
     sleeper: Arc<dyn Sleeper>,
     base_url: String,
-    token: String,
+    token: Option<String>,
 }
 
 impl ApiClient {
@@ -67,7 +67,24 @@ impl ApiClient {
             transport,
             sleeper,
             base_url: base_url.into(),
-            token: token.into(),
+            token: Some(token.into()),
+        }
+    }
+
+    /// A client for the endpoints that take no auth — the device-login start
+    /// and poll pair. Sending an empty bearer token instead would work, but it
+    /// would also make a genuinely missing token indistinguishable from a
+    /// deliberately unauthenticated call.
+    pub fn anonymous(
+        transport: Arc<dyn Transport>,
+        sleeper: Arc<dyn Sleeper>,
+        base_url: impl Into<String>,
+    ) -> Self {
+        Self {
+            transport,
+            sleeper,
+            base_url: base_url.into(),
+            token: None,
         }
     }
 
@@ -77,12 +94,14 @@ impl ApiClient {
 
     fn headers(&self, confirmation_id: Option<&str>) -> Vec<(String, String)> {
         let mut h = vec![
-            ("Authorization".into(), format!("Bearer {}", self.token)),
             ("Content-Type".into(), "application/json".into()),
             // The only thing distinguishing CLI traffic from an agent or raw
             // curl on the same endpoints. See crate::telemetry.
             ("User-Agent".into(), crate::telemetry::user_agent()),
         ];
+        if let Some(token) = &self.token {
+            h.push(("Authorization".into(), format!("Bearer {token}")));
+        }
         if let Some(id) = confirmation_id {
             h.push((CONFIRMATION_HEADER.into(), id.into()));
         }
@@ -448,5 +467,36 @@ mod tests {
             ApiOutcome::Ok { value, .. } => assert_eq!(value, serde_json::Value::Null),
             other => panic!("expected Ok, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn anonymous_client_sends_no_authorization_header() {
+        let t = Arc::new(ScriptedTransport::new(vec![resp(200, "{}", None)]));
+        let c = ApiClient::anonymous(
+            t.clone(),
+            Arc::new(NoopSleeper::default()),
+            "https://api.test",
+        );
+        c.get("/v1/login/device").unwrap();
+        let reqs = t.requests.lock().unwrap();
+        let (_, _, headers, _) = &reqs[0];
+        assert!(
+            !headers.iter().any(|(k, _)| k == "Authorization"),
+            "anonymous client must not send Authorization"
+        );
+    }
+
+    #[test]
+    fn anonymous_client_still_sends_user_agent() {
+        let t = Arc::new(ScriptedTransport::new(vec![resp(200, "{}", None)]));
+        let c = ApiClient::anonymous(
+            t.clone(),
+            Arc::new(NoopSleeper::default()),
+            "https://api.test",
+        );
+        c.get("/v1/login/device").unwrap();
+        let reqs = t.requests.lock().unwrap();
+        let (_, _, headers, _) = &reqs[0];
+        assert!(headers.iter().any(|(k, _)| k == "User-Agent"));
     }
 }
