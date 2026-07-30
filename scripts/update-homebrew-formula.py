@@ -36,13 +36,17 @@ UA = "keylight-formula-updater"
 #
 # Adding a platform here is the SECOND half of the change, never the first.
 # `rewrite` fails if an entry is never referenced by the formula, so a key added
-# before the formula points at that URL breaks the release. From v0.1.1 there is
-# an x86_64-apple-darwin binary; switching the formula's Intel-macOS branch off
-# the crates.io source build and onto it means editing the formula and adding
-# the key here in one go.
+# before the formula points at that URL breaks the release. x86_64-apple-darwin
+# landed that way in the v0.1.1 tap PR: the formula's Intel-macOS branch moved
+# off the crates.io source build and onto the binary in the same commit as the
+# key here. Dropping that source build also dropped `depends_on "rust"`, which
+# is what had been stopping test-bot from bottling Intel macOS at all.
 DOWNLOADS = {
     "aarch64-apple-darwin": lambda v: (
         f"https://github.com/{REPO}/releases/download/v{v}/keylight-aarch64-apple-darwin"
+    ),
+    "x86_64-apple-darwin": lambda v: (
+        f"https://github.com/{REPO}/releases/download/v{v}/keylight-x86_64-apple-darwin"
     ),
     "x86_64-unknown-linux-gnu": lambda v: (
         f"https://github.com/{REPO}/releases/download/v{v}/keylight-x86_64-unknown-linux-gnu"
