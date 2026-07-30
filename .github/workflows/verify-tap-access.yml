@@ -45,3 +45,30 @@ jobs:
             echo "::error::HOMEBREW_TAP_TOKEN cannot push to the tap. Check the token's resource owner is keylight-dev (not a personal account) and that it grants Contents: read and write on keylight-dev/homebrew-tap."
             exit 1
           fi
+
+      # Contents: write is not enough — the release job opens a pull request, and
+      # that is a separate fine-grained permission. v0.1.1 found this out the hard
+      # way: the branch pushed, then PR creation failed with "Resource not
+      # accessible by personal access token".
+      #
+      # Probed by asking for a pull request from main into main. A token without
+      # the permission is refused with 403 before validation; a token with it gets
+      # 422 for the nonsense request. Either way nothing is created.
+      - name: Confirm pull-request access without opening one
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set +e
+          out=$(gh api repos/keylight-dev/homebrew-tap/pulls -X POST \
+                  -f head=main -f base=main -f title="permission probe" 2>&1)
+          set -e
+          if echo "$out" | grep -qi "Resource not accessible"; then
+            echo "::error::HOMEBREW_TAP_TOKEN cannot open pull requests. Edit the token and add 'Pull requests: Read and write' alongside Contents."
+            exit 1
+          elif echo "$out" | grep -qiE "Validation Failed|No commits between|same branch"; then
+            echo "::notice::HOMEBREW_TAP_TOKEN can open pull requests (rejected on validation, not permission)."
+          else
+            echo "::error::Unexpected response while probing pull-request access:"
+            echo "$out"
+            exit 1
+          fi
