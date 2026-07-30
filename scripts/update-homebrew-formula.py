@@ -33,6 +33,13 @@ UA = "keylight-formula-updater"
 # Every download the formula pins, keyed by the URL it appears under. The
 # formula is the source of truth for which platforms exist; this map only needs
 # to know how to build each URL for a given version.
+#
+# Adding a platform here is the SECOND half of the change, never the first.
+# `rewrite` fails if an entry is never referenced by the formula, so a key added
+# before the formula points at that URL breaks the release. From v0.1.1 there is
+# an x86_64-apple-darwin binary; switching the formula's Intel-macOS branch off
+# the crates.io source build and onto it means editing the formula and adding
+# the key here in one go.
 DOWNLOADS = {
     "aarch64-apple-darwin": lambda v: (
         f"https://github.com/{REPO}/releases/download/v{v}/keylight-aarch64-apple-darwin"

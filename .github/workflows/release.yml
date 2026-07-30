@@ -59,6 +59,11 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             ext: ""
+          # Cross-compiled from the arm64 runner. Apple's toolchain does this
+          # without a separate linker, so it needs no Intel runner of its own.
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            ext: ""
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             ext: ""
@@ -69,9 +74,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release
-      # Target-suffixed so the three platforms don't collide, and only the
-      # executable is uploaded (not .d/.pdb build artifacts).
+        with:
+          targets: ${{ matrix.target }}
+      # Build for the triple the artifact is named after. Previously this was a
+      # bare `cargo build --release`, so every binary was named for a target the
+      # build never specified — correct only because each runner happened to be
+      # that architecture, and silently wrong the moment two entries shared a
+      # runner, which is exactly what adding Intel macOS does.
+      - run: cargo build --release --target ${{ matrix.target }}
+      # Target-suffixed so the platforms don't collide, and only the executable
+      # is uploaded (not .d/.pdb build artifacts).
       #
       # These macOS binaries are NOT signed or notarized, so Gatekeeper will
       # warn on first run. Signing needs an Apple Developer ID certificate;
@@ -80,7 +92,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/release/keylight${{ matrix.ext }}" "dist/keylight-${{ matrix.target }}${{ matrix.ext }}"
+          cp "target/${{ matrix.target }}/release/keylight${{ matrix.ext }}" "dist/keylight-${{ matrix.target }}${{ matrix.ext }}"
       - name: Extract changelog notes for this tag
         shell: bash
         run: |
