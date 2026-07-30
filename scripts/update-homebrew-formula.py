@@ -76,10 +76,10 @@ def rewrite(formula: str, version: str, checksums: dict[str, str]) -> str:
     would silently do nothing when a release reuses one (identical rebuild), and
     "silently did nothing" is the failure this whole script exists to prevent.
     """
-    current = re.search(r'^\s*version\s+"([^"]+)"', formula, re.MULTILINE)
-    if not current:
-        raise SystemExit("error: no `version` line in the formula")
-
+    # An explicit `version` is optional and currently absent: every URL carries
+    # the version, so Homebrew scans it, and `brew audit` fails the tap's CI for
+    # declaring it redundantly. Rewrite it when present rather than requiring it —
+    # the URLs below are what actually move the formula to a new release.
     updated = re.sub(
         r'^(\s*version\s+)"[^"]+"', rf'\1"{version}"', formula, count=1, flags=re.MULTILINE
     )
