@@ -152,16 +152,47 @@ jobs:
             --version "${GITHUB_REF_NAME#v}" \
             --formula tap/Formula/keylight.rb
 
-      - name: Commit and push the formula
+      # Opens a pull request rather than pushing to the tap's main branch. That
+      # is not ceremony: the tap ships bottles, and bottles are built by the
+      # tap's own `brew test-bot` on pull_request. A direct push produces a
+      # formula at the new version with no bottle for it, so every install falls
+      # back to building from source — which is exactly the Xcode-minimum path
+      # the bottles exist to avoid.
+      #
+      # The PR gets bottles built against it; `brew pr-pull` in the tap then
+      # publishes them and merges. One dispatch, and the release keeps its
+      # bottles.
+      - name: Open a formula PR against the tap
         if: steps.gate.outputs.run == 'true'
         working-directory: tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           ver="${GITHUB_REF_NAME#v}"
           if git diff --quiet; then
-            echo "formula already at $ver; nothing to push"
+            echo "formula already at $ver; nothing to open"
             exit 0
           fi
+          branch="keylight-$ver"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
           git commit -am "keylight $ver"
-          git push
+          git push -u origin "$branch"
+          gh pr create \
+            --repo keylight-dev/homebrew-tap \
+            --base main --head "$branch" \
+            --title "keylight $ver" \
+            --body "Automated formula bump for [keylight-cli $ver](https://github.com/keylight-dev/keylight-cli/releases/tag/${GITHUB_REF_NAME}).
+
+          The bottle block was dropped by the bump because bottles are pinned to the version they were built for. CI on this PR builds new ones; \`brew pr-pull\` publishes them and merges.
+
+          Run: \`gh workflow run publish.yml --repo keylight-dev/homebrew-tap -f pull_request=<number>\`"
+
+      # A release whose tap PR was never merged leaves `brew install` on the
+      # previous version, silently. Say so in the run summary rather than
+      # leaving it to be noticed.
+      - name: Note what still needs doing
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          echo "::notice::Formula PR opened against keylight-dev/homebrew-tap. It is NOT merged: run publish.yml there with the PR number to build bottles, publish them, and merge."

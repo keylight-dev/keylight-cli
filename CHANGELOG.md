@@ -12,6 +12,32 @@ against.
 
 Nothing yet.
 
+## [0.1.1] - 2026-07-30
+
+Packaging only — no change to any command, flag, or output.
+
+### Added
+
+- **Homebrew.** `brew tap keylight-dev/tap && brew trust keylight-dev/tap &&
+  brew install keylight` installs a prebuilt binary: no Rust toolchain, and
+  nothing to clear past Gatekeeper. Bottles mean the install pours rather than
+  building, so it never runs Homebrew's build-environment checks — which reject
+  an Xcode older than the minimum for your macOS, an error about Xcode on a
+  machine that only wanted a licensing CLI.
+- **An Intel macOS binary** (`x86_64-apple-darwin`), cross-compiled from the
+  arm64 runner. Previously Intel Macs had no published binary and fell through
+  to a source build.
+
+### Fixed
+
+- Release builds now pass `--target` explicitly. Artifacts were named for a
+  triple the build never specified — correct only while each runner happened to
+  be that architecture, and wrong the moment two targets shared a runner, which
+  is what adding Intel macOS does.
+- The `products list` sample in the README showed `false` under FREE TIER and
+  TEST MODE. The API omits those flags when they are off rather than sending
+  `false`, so the real output is `-`.
+
 ## [0.1.0] - 2026-07-29
 
 First release. Every endpoint the Keylight management API exposes is reachable
