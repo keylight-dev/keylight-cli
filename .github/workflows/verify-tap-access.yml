@@ -1,0 +1,47 @@
+name: Verify tap access
+
+# Does HOMEBREW_TAP_TOKEN still grant write access to the tap?
+#
+# The release workflow's `homebrew` job pushes the updated formula to
+# keylight-dev/homebrew-tap, which the default GITHUB_TOKEN cannot reach. If the
+# secret is missing, expired, or was minted against the wrong resource owner,
+# that job is where you find out — in the middle of a release, after the crate is
+# already published and the tag already exists.
+#
+# Run this by hand instead: after creating or rotating the token, and any time
+# you want to know before a release rather than during one. It changes nothing —
+# the push is a dry run, so a pass means "the credential would have worked".
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tap with the release credential
+        uses: actions/checkout@v5
+        with:
+          repository: keylight-dev/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Confirm read access
+        working-directory: tap
+        run: |
+          echo "Tap HEAD: $(git log --oneline -1)"
+          test -f Formula/keylight.rb || { echo "::error::Formula/keylight.rb missing from the tap"; exit 1; }
+          echo "Formula version: $(grep -m1 -o 'version \"[^\"]*\"' Formula/keylight.rb)"
+
+      # Read access alone is not enough: a token can clone a public repo while
+      # having no permission to write to it, so checking out proves nothing about
+      # the half that matters. A dry-run push performs the real permission
+      # negotiation and updates no refs.
+      - name: Confirm write access without writing
+        working-directory: tap
+        run: |
+          if git push --dry-run origin HEAD:main; then
+            echo "::notice::HOMEBREW_TAP_TOKEN can push to keylight-dev/homebrew-tap."
+          else
+            echo "::error::HOMEBREW_TAP_TOKEN cannot push to the tap. Check the token's resource owner is keylight-dev (not a personal account) and that it grants Contents: read and write on keylight-dev/homebrew-tap."
+            exit 1
+          fi
