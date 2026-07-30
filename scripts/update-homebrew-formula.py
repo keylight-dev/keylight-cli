@@ -84,6 +84,18 @@ def rewrite(formula: str, version: str, checksums: dict[str, str]) -> str:
         r'^(\s*version\s+)"[^"]+"', rf'\1"{version}"', formula, count=1, flags=re.MULTILINE
     )
 
+    # Drop any `bottle do` block. Bottles are built per version and hosted under a
+    # release named for it, so a block left behind from the previous version sends
+    # `brew install` to a URL that does not exist and the install fails outright —
+    # worse than having no bottle. Removing it makes the new version install from
+    # source until a bottle PR runs against the tap, which is the documented cost
+    # of bumping the formula automatically.
+    # Consumes the blank line after the block too, or removal leaves two in a row
+    # and `brew style` fails the tap's CI on the very commit meant to fix it.
+    updated = re.sub(
+        r'\n[ \t]*bottle do\n.*?\n[ \t]*end\n\n', '\n', updated, count=1, flags=re.DOTALL
+    )
+
     replaced = set()
 
     def substitute(match: re.Match[str]) -> str:
