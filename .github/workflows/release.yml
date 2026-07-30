@@ -96,3 +96,60 @@ jobs:
         with:
           files: "dist/keylight-${{ matrix.target }}*"
           body_path: RELEASE_NOTES.md
+
+  # Repoint keylight-dev/homebrew-tap at this release. Runs after `binaries`
+  # because it checksums the assets that job uploads.
+  #
+  # A stale tap is worse than no tap: `brew install keylight` would keep
+  # installing an old CLI while reporting success. So this job exists to make
+  # the tap impossible to forget, not as a convenience.
+  homebrew:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Pushing to another repository needs a token the default GITHUB_TOKEN
+      # cannot provide. Until that secret exists the release must still
+      # succeed — failing a published release over packaging would be the
+      # wrong trade — so this gates instead of erroring, and says so loudly.
+      - name: Check for a tap token
+        id: gate
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set — the Homebrew tap was NOT updated and now points at an older release. Set the secret and re-run this job."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out the tap
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: keylight-dev/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Point the formula at this release
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          python3 scripts/update-homebrew-formula.py \
+            --version "${GITHUB_REF_NAME#v}" \
+            --formula tap/Formula/keylight.rb
+
+      - name: Commit and push the formula
+        if: steps.gate.outputs.run == 'true'
+        working-directory: tap
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          if git diff --quiet; then
+            echo "formula already at $ver; nothing to push"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "keylight $ver"
+          git push

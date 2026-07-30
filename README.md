@@ -23,19 +23,36 @@ reachable from a command, and a coverage test fails the build if that stops bein
 
 ## Install
 
+### Homebrew (macOS and Linux)
+
+```bash
+brew tap keylight-dev/tap
+brew trust keylight-dev/tap
+brew install keylight
+```
+
+No Rust toolchain, and nothing to clear past Gatekeeper. The `brew trust` step is not specific
+to this tap — since Homebrew 6, loading a formula from any third-party tap fails until you trust
+it. The formula is [60 lines of Ruby](https://github.com/keylight-dev/homebrew-tap/blob/main/Formula/keylight.rb)
+and worth reading before you trust it.
+
+### Cargo
+
 ```bash
 cargo install keylight-cli
 ```
 
-Installs a `keylight` binary. Requires Rust 1.85+ (edition 2024).
+Installs a `keylight` binary. Requires Rust 1.85+ (edition 2024). The crate is `keylight-cli`;
+the binary is `keylight`.
 
-Or download a prebuilt binary from [Releases](https://github.com/keylight-dev/keylight-cli/releases)
-for macOS (Apple Silicon), Linux (x86_64), or Windows (x86_64).
+### Prebuilt binary
 
-> **macOS:** the prebuilt binaries are not yet code-signed or notarized, so Gatekeeper will
-> block them on first run. Either clear the quarantine flag with
-> `xattr -d com.apple.quarantine ./keylight`, or use `cargo install`, which builds locally and
-> avoids the issue entirely.
+Download from [Releases](https://github.com/keylight-dev/keylight-cli/releases) for macOS
+(Apple Silicon), Linux (x86_64), or Windows (x86_64).
+
+> **macOS:** the release binaries are not yet code-signed or notarized, so Gatekeeper will block
+> them on first run — clear the quarantine flag with `xattr -d com.apple.quarantine ./keylight`.
+> Homebrew and `cargo install` both avoid this entirely, which is why they come first.
 
 ## Quick start
 
@@ -122,9 +139,12 @@ keylight products test-mode disable my-app
 
 ```
 ID        NAME         PREFIX  FREE TIER  TEST MODE
-my-app    My App       MYAP    true       false
-other     Other App    OTHR    false      true
+my-app    My App       MYAP    true       -
+other     Other App    OTHR    -          true
 ```
+
+A `-` means the API did not return a value for that column. It omits these flags entirely when
+they are off rather than sending `false`, so an off flag reads as `-`, not `false`.
 
 Enabling Stripe test mode needs two secrets, read from environment variables you name:
 
