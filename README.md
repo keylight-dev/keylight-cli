@@ -21,6 +21,22 @@ reachable from a command, and a coverage test fails the build if that stops bein
 > **Status: 0.x.** Flag names and human-readable output may change in a minor release. The
 > `--json` output and the exit codes are the parts to script against.
 
+## Why Keylight
+
+Licensing shouldn't mean bolting a heavyweight, phone-home-or-die SDK onto your app.
+
+- **Works offline.** The license is a signed lease your app verifies locally with Ed25519 — no
+  network round-trip to gate a feature, no lockout when the machine is offline.
+- **Tamper-resistant by design.** Entitlements live *inside* the signature; a forged or
+  hand-edited lease can't pass verification without the tenant's private key.
+- **One command surface for the whole tenant.** Apps, key types, licenses, customers, and
+  payment integrations — every operation the dashboard exposes, scriptable from the terminal or
+  a coding agent.
+- **RFC 8628 device-code login.** `keylight login` prints a code, opens the browser to approve
+  it, and works over SSH and on headless machines — the browser never needs to reach the CLI.
+- **Confirm-gated by default.** Destructive operations require an out-of-band browser approval,
+  so a leaked token can't quietly delete anything.
+
 ## Install
 
 ### Homebrew (macOS and Linux)
@@ -352,6 +368,25 @@ endpoint that no command reaches.
 - [`keylight-rust`](https://github.com/keylight-dev/keylight-rust) — Rust SDK + Tauri plugin
 - [`keylight-js`](https://github.com/keylight-dev/keylight-js) — TypeScript/JavaScript SDK
 - [`keylight-csharp`](https://github.com/keylight-dev/keylight-csharp) — C#/.NET SDK
+
+## About Keylight
+
+Keylight is the licensing layer for desktop apps. You keep your own Stripe account,
+your own pricing, and your own customers — Keylight issues the licenses and tells your
+app who is allowed to run it. This CLI is how you manage all of that from a terminal
+instead of the dashboard.
+
+- **License keys** issued automatically when a payment completes
+- **Device activations** with limits you set, and self-serve deactivation
+- **Offline validation** — signed Ed25519 leases your app verifies locally
+- **Feature entitlements** signed into the lease, so tiers work offline too
+
+[keylight.dev](https://keylight.dev) · [Documentation](https://docs.keylight.dev) · [Pricing](https://keylight.dev/pricing)
+
+### Further reading
+
+- [Manage Your App Licensing From the Terminal](https://keylight.dev/blog/manage-licensing-from-terminal)
+- [The 9 Licensing Metrics Every App Business Should Track](https://keylight.dev/blog/licensing-metrics-to-track)
 
 ## License
 
