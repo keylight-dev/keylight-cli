@@ -3,9 +3,9 @@
 //! The largest group, and the first to exercise both confirm-gated paths:
 //! `revoke` returns JSON, `export` returns `text/csv`.
 //!
-//! Lists and detail views carry only `displayKey`, the masked form. There is
-//! exactly one exception: `remint` answers with `licenseKey`, the plaintext
-//! replacement — **returned once**, never again. `remint` therefore prints it,
+//! Lists and detail views carry only `displayKey`, the masked form. The two
+//! mint routes are the exception: `create` and `remint` both answer with
+//! `licenseKey`, the plaintext — **returned once**, never again. Both print it,
 //! because a caller who doesn't capture it there has lost it permanently.
 
 use super::{Context, Deps, json_body, query_path, run_gated, run_gated_raw};
@@ -162,14 +162,7 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: LicensesCommand) -> Result<()> {
                 Some(&body),
             )?;
             emit(ctx.json, &value, |v| {
-                // The one place a plaintext key appears. The spec is explicit
-                // that it is "returned once" — not printing it here would
-                // lose the new key permanently, which defeats the command.
-                if let Some(key) = v.get("licenseKey").and_then(|k| k.as_str()) {
-                    println!("New key: {key}");
-                    println!("This is the only time it is shown. Save it now.");
-                    println!();
-                }
+                print_plaintext_key(v, "New key");
                 print_license(v);
             });
             Ok(())
@@ -273,6 +266,25 @@ fn list(
 ///
 /// Neither is confirm-gated, so they go straight to the client rather than
 /// through `run_gated` — `run_gated` has no way to carry the extra header.
+/// The plaintext key from a mint or remint response, if the route returned one.
+///
+/// `MintLicenseResult` and `RemintLicenseResult` both require `licenseKey` and
+/// both describe it as returned once, never retrievable again. Only `remint`
+/// used to print it, so `keylight licenses create` handed back a masked
+/// `displayKey` and dropped the real key on the floor — the operator had to
+/// re-run with `--json`, except the key was already gone by then.
+fn plaintext_key(v: &serde_json::Value) -> Option<&str> {
+    v.get("licenseKey").and_then(|k| k.as_str())
+}
+
+fn print_plaintext_key(v: &serde_json::Value, label: &str) {
+    if let Some(key) = plaintext_key(v) {
+        println!("{label}: {key}");
+        println!("This is the only time it is shown. Save it now.");
+        println!();
+    }
+}
+
 fn mint(
     ctx: &Context,
     deps: &Deps,
@@ -300,6 +312,10 @@ fn mint(
                 ("Failed", output::cell(v.get("failed"))),
             ]);
         } else {
+            // "New key", not "Key": the detail block below prints the masked
+            // `Key:` line, and the same label against two different values
+            // reads as a contradiction.
+            print_plaintext_key(v, "New key");
             print_license(v);
         }
     });
@@ -412,6 +428,40 @@ mod tests {
     use std::sync::Arc;
 
     const LICENSE: &str = r#"{"id":"abc","productId":"my-app","keyTypeId":"pro","status":"active","displayKey":"MYAP-••••-1234","activationLimit":3,"activationCount":1,"expiresAt":null,"createdAt":1781775062000,"updatedAt":1781775062000}"#;
+
+    // ---- the plaintext key ----------------------------------------------
+    //
+    // `MintLicenseResult` and `RemintLicenseResult` both require `licenseKey`,
+    // but only remint ever printed it, so `create` silently discarded the one
+    // value the caller needed. Shapes below are real responses from
+    // api.keylight.dev.
+
+    #[test]
+    fn create_surfaces_the_plaintext_key() {
+        let body = serde_json::json!({
+            "license": { "displayKey": "CLIX-****-****-****-BB7G1" },
+            "licenseKey": "CLIX-2JW2Y-WZ6JF-CBPTM-BB7G1",
+            "emailedCustomer": false,
+        });
+        assert_eq!(plaintext_key(&body), Some("CLIX-2JW2Y-WZ6JF-CBPTM-BB7G1"));
+    }
+
+    #[test]
+    fn remint_surfaces_the_plaintext_key() {
+        let body = serde_json::json!({
+            "license": { "displayKey": "CLIX-****-****-****-F7Z5A" },
+            "licenseKey": "CLIX-96BKK-CJG2J-JW28B-F7Z5A",
+        });
+        assert_eq!(plaintext_key(&body), Some("CLIX-96BKK-CJG2J-JW28B-F7Z5A"));
+    }
+
+    /// A masked-only payload must not be mistaken for a plaintext key — that
+    /// would print `CLIX-****-****-****-BB7G1` under "save this now".
+    #[test]
+    fn a_masked_only_response_yields_no_plaintext_key() {
+        let body = serde_json::json!({ "displayKey": "CLIX-****-****-****-BB7G1" });
+        assert_eq!(plaintext_key(&body), None);
+    }
 
     fn run_cmd(t: &Arc<ScriptedTransport>, cmd: LicensesCommand) -> Result<()> {
         let o = RecordingOpener::new();

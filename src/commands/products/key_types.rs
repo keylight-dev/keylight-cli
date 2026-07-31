@@ -231,6 +231,20 @@ fn list(ctx: &Context, deps: &Deps, product: &str) -> Result<()> {
     Ok(())
 }
 
+/// The key-type object inside a mutation response.
+///
+/// The API does not answer with a bare key type: `POST` wraps it in `created`
+/// and `PATCH` in `updated`. Reading only `keyType` — a key no route actually
+/// sends — meant every field resolved to `-`, so `create` and `update` printed
+/// an empty table while having succeeded server-side. The bare-object fallback
+/// stays for a response shape that grows a plain body later.
+fn key_type_payload(v: &serde_json::Value) -> &serde_json::Value {
+    ["keyType", "created", "updated"]
+        .iter()
+        .find_map(|k| v.get(k))
+        .unwrap_or(v)
+}
+
 fn write(
     ctx: &Context,
     deps: &Deps,
@@ -243,7 +257,7 @@ fn write(
     // Mutations print the resulting object rather than a bare success line, so
     // the human sees the new state and an agent avoids a second call.
     emit(ctx.json, &value, |v| {
-        let k = v.get("keyType").unwrap_or(v);
+        let k = key_type_payload(v);
         output::kv(&[
             ("ID", output::cell(k.get("keyTypeId"))),
             ("Name", output::cell(k.get("displayName"))),
@@ -282,6 +296,47 @@ mod tests {
     #[test]
     fn an_unsupplied_duration_is_absent() {
         assert_eq!(duration_value(None), None);
+    }
+
+    // ---- mutation response envelopes -------------------------------------
+    //
+    // Captured from api.keylight.dev, not written from the spec: reading the
+    // wrong key rendered an empty table for every `create` and `update` while
+    // the write itself succeeded, and asserting the assumed shape is what let
+    // that ship.
+
+    #[test]
+    fn create_reads_the_created_envelope() {
+        let body = serde_json::json!({
+            "created": {
+                "keyTypeId": "clitest2",
+                "displayName": "CLI Test Tier 2",
+                "activationLimit": 5,
+                "durationDays": null,
+            }
+        });
+        assert_eq!(key_type_payload(&body)["keyTypeId"], "clitest2");
+    }
+
+    #[test]
+    fn update_reads_the_updated_envelope() {
+        let body = serde_json::json!({
+            "updated": {
+                "keyTypeId": "clitest",
+                "displayName": "CLI Test Tier v2",
+                "activationLimit": 4,
+                "durationDays": null,
+            }
+        });
+        assert_eq!(key_type_payload(&body)["displayName"], "CLI Test Tier v2");
+    }
+
+    /// A bare object still renders, so a future route that stops wrapping does
+    /// not regress to an empty table.
+    #[test]
+    fn a_bare_key_type_object_is_used_as_is() {
+        let body = serde_json::json!({ "keyTypeId": "default", "activationLimit": 3 });
+        assert_eq!(key_type_payload(&body)["keyTypeId"], "default");
     }
 
     // ---- wire calls ------------------------------------------------------

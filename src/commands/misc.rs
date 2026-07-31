@@ -222,13 +222,22 @@ pub fn run_test_purchase(ctx: &Context, deps: &Deps, cmd: TestPurchaseCommand) -
     }
 }
 
+/// The masked key on a test-purchase run.
+///
+/// The test-purchase routes call it `licenseKeyMasked`; `displayKey` is the
+/// licenses routes' name for the same thing. Reading only the latter printed
+/// `Key: -` on every run, including completed ones that had minted a key.
+fn masked_key(r: &serde_json::Value) -> Option<&serde_json::Value> {
+    r.get("licenseKeyMasked").or_else(|| r.get("displayKey"))
+}
+
 fn print_run(v: &serde_json::Value) {
     let r = v.get("run").unwrap_or(v);
     output::kv(&[
         ("Run", output::cell(r.get("runId").or(r.get("id")))),
         ("Status", output::cell(r.get("status"))),
         ("App", output::cell(r.get("productId"))),
-        ("Key", output::cell(r.get("displayKey"))),
+        ("Key", output::cell(masked_key(r))),
     ]);
 }
 
@@ -237,6 +246,24 @@ mod tests {
     use super::*;
     use crate::commands::testing::{RecordingOpener, cleanup, ctx, deps, request_at, transport};
     use crate::test_support::resp;
+
+    /// Real `POST /v1/test-purchase` body from api.keylight.dev.
+    #[test]
+    fn a_test_run_key_is_read_from_license_key_masked() {
+        let run = serde_json::json!({
+            "id": "813266a390359a2e53fb7ee71b6b5947",
+            "productId": "clix",
+            "status": "completed",
+            "licenseKeyMasked": "CLIX-****-****-****-MPWWP",
+        });
+        assert_eq!(masked_key(&run).unwrap(), "CLIX-****-****-****-MPWWP");
+    }
+
+    #[test]
+    fn a_run_without_a_key_yields_none() {
+        let run = serde_json::json!({ "id": "abc", "status": "pending" });
+        assert!(masked_key(&run).is_none());
+    }
 
     /// A renderer built on guessed field names still prints a well-formed
     /// table — every cell just reads `-`. Request-shape tests cannot see

@@ -119,7 +119,23 @@ enum AuthCommand {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    // clap exits `2` on a usage error, which collides with the documented
+    // meaning of `2` — "not authenticated, or the token lacks the required
+    // scope. Re-run `keylight login`." A mistyped flag is not something
+    // re-authenticating fixes, so an unattended caller following that table
+    // logs in, retries the same broken command, and loops. Usage errors are
+    // `1`, "everything else"; `2` stays the one failure a caller can resolve
+    // on its own, which is the reason it was broken out in the first place.
+    //
+    // `--help` and `--version` also arrive here as errors and must still exit
+    // `0` on stdout — `use_stderr()` is what separates the two.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            let _ = e.print();
+            std::process::exit(if e.use_stderr() { 1 } else { 0 });
+        }
+    };
     let config_path = match config::config_path() {
         Some(p) => p,
         None => {
