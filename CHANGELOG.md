@@ -12,6 +12,48 @@ against.
 
 Nothing yet.
 
+## [0.1.2] - 2026-07-31
+
+First release after running every command against production rather than
+against a test double. The command surface was already complete; what had never
+been checked was whether the *output* was right. Three commands were printing
+the wrong thing, and one of them was losing a value that cannot be recovered.
+
+### Fixed
+
+- **`licenses create` no longer discards the license key.** The API returns the
+  plaintext key once, on mint, and never again. `remint` printed it; `create`
+  printed only the masked form, so a key issued without `--json` or
+  `--send-email` was gone the moment the command returned. Both mint paths now
+  print it the same way.
+- **`products key-types create` and `update` print the key type again.** Both
+  read a `keyType` field that no route sends — the API wraps the object in
+  `created` and `updated` — so every field rendered as `-` and the output looked
+  like a failure. The write had always succeeded; only the display was wrong.
+- **`test-purchase create` and `get` show the key.** They read `displayKey`,
+  which is the *licenses* routes' name for it; the test-purchase routes send
+  `licenseKeyMasked`. Every run printed `Key: -`, including completed ones.
+
+### Changed
+
+- **A usage error now exits `1` instead of `2`.** `2` is documented as "not
+  authenticated, or the token lacks the required scope — re-run `keylight
+  login`", but argument parsing exited `2` as well, so a mistyped flag was
+  indistinguishable from an auth failure. An unattended caller following the
+  documented table would log in, retry the same broken command, and loop. `2`
+  now means only what it says. `--help` and `--version` still exit `0`.
+
+  This aligns the implementation with the published exit-code table rather than
+  changing that table. A script keying on observed behaviour rather than the
+  documented meaning may need adjusting.
+
+### Notes
+
+Each fix is behind a small pure function with tests against real response
+bodies captured from `api.keylight.dev`. The previous tests asserted the same
+assumed shapes the code used, which is why all three renderer bugs passed a
+green suite.
+
 ## [0.1.1] - 2026-07-30
 
 Packaging only — no change to any command, flag, or output.
