@@ -10,7 +10,23 @@ against.
 
 ## [Unreleased]
 
-Nothing yet.
+## [0.1.3] - 2026-08-02
+
+### Added
+
+- **`keylight setup verify-license`.** A one-time terminal check that mints a
+  recognizable `Setup check` license, activates it through the real Rust SDK,
+  and verifies the returned lease against the tenant's Ed25519 keyset. The SDK
+  key is read from `KEYLIGHT_SDK_KEY`, never from an argument.
+- **Safe cleanup and retry reuse.** Setup state is held in a separate
+  owner-only local file until `--clean` deactivates the device and revokes the
+  test license. Non-interactive runs never delete it implicitly.
+
+### Changed
+
+- **Setup input errors exit `2`.** Missing SDK keys and an ambiguous app
+  selection are actionable setup failures; lease and activation failures still
+  exit `1`, and confirmation denial or expiry remains `3`.
 
 ## [0.1.2] - 2026-07-31
 

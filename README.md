@@ -269,6 +269,19 @@ keylight test-purchase get <run-id>
 `webhook set` returns the signing secret — use it to verify the signature on every delivery.
 `webhook get` only reports whether a secret exists, never its value.
 
+### setup verify-license
+
+```bash
+KEYLIGHT_SDK_KEY=sdk_live_... keylight setup verify-license --product my-app
+keylight setup verify-license --clean
+```
+
+Issues a real test license, activates it through the Rust SDK, and verifies the
+returned lease against the tenant keyset. It does not modify application code
+or count as product usage. The check is identified as `Setup check`; a local,
+owner-only state file retains its plaintext key only until `--clean` removes
+the device and revokes the license.
+
 ## `--json`
 
 Every command supports `--json`, which prints the raw API response — that is the contract to
@@ -288,11 +301,11 @@ stdout stays parseable and redirects stay clean.
 |---|---|
 | `0` | Success |
 | `1` | Everything else |
-| `2` | Not authenticated — no token, or the server rejected it. Run `keylight login`. |
+| `2` | Needs action: authenticate, or supply the missing setup input. |
 | `3` | A confirmation was denied or expired |
 
-`2` is distinct because "you need to authenticate" is the one failure an agent can act on
-without a human.
+`2` is distinct because it marks a failure an agent can act on without treating a
+verification failure as something to work around.
 
 ## Confirm-gated operations
 
