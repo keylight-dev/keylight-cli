@@ -15,7 +15,6 @@
 use clap::{Parser, Subcommand};
 use keylight_cli::commands::{self, Context, Deps};
 use keylight_cli::config;
-use keylight_cli::error::CliError;
 use std::io::IsTerminal;
 
 #[derive(Parser)]
@@ -83,6 +82,11 @@ enum Command {
         #[command(subcommand)]
         command: commands::products::ProductsCommand,
     },
+    /// One-time setup checks.
+    Setup {
+        #[command(subcommand)]
+        command: commands::setup::SetupCommand,
+    },
     /// Read or rotate the SDK key.
     SdkKey {
         #[command(subcommand)]
@@ -119,13 +123,10 @@ enum AuthCommand {
 }
 
 fn main() {
-    // clap exits `2` on a usage error, which collides with the documented
-    // meaning of `2` — "not authenticated, or the token lacks the required
-    // scope. Re-run `keylight login`." A mistyped flag is not something
-    // re-authenticating fixes, so an unattended caller following that table
-    // logs in, retries the same broken command, and loops. Usage errors are
-    // `1`, "everything else"; `2` stays the one failure a caller can resolve
-    // on its own, which is the reason it was broken out in the first place.
+    // clap exits `2` for a parser error, but its message is unstructured and
+    // cannot distinguish a typo from this command's documented input errors.
+    // Keep parser failures at `1`; command-level usage errors use CliError's
+    // stable `2` instead, alongside authentication problems that need action.
     //
     // `--help` and `--version` also arrive here as errors and must still exit
     // `0` on stdout — `use_stderr()` is what separates the two.
@@ -167,6 +168,7 @@ fn main() {
         Command::Integrations { command } => commands::integrations::run(&ctx, &deps, command),
         Command::Licenses { command } => commands::licenses::run(&ctx, &deps, command),
         Command::Products { command } => commands::products::run(&ctx, &deps, command),
+        Command::Setup { command } => commands::setup::run(&ctx, &deps, command),
         Command::SdkKey { command } => commands::misc::run_sdk_key(&ctx, &deps, command),
         Command::TestPurchase { command } => {
             commands::misc::run_test_purchase(&ctx, &deps, command)
@@ -182,19 +184,6 @@ fn main() {
         } else {
             eprintln!("error: {e}");
         }
-        std::process::exit(exit_code(&e));
-    }
-}
-
-/// A stable, if coarse, exit-code contract for scripts: `2` for auth
-/// problems (fixable with `auth set-token`/`login`), `3` for a rejected
-/// confirmation, `1` for everything else.
-fn exit_code(e: &CliError) -> i32 {
-    match e {
-        CliError::NoToken
-        | CliError::Api { status: 401, .. }
-        | CliError::Api { status: 403, .. } => 2,
-        CliError::ConfirmationNotApproved { .. } | CliError::ConfirmationTimedOut => 3,
-        _ => 1,
+        std::process::exit(e.exit_code());
     }
 }

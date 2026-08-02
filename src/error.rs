@@ -33,6 +33,16 @@ pub enum CliError {
     #[error("confirmation timed out waiting for approval")]
     ConfirmationTimedOut,
 
+    /// The command was understood, but its inputs do not make a safe setup
+    /// check possible (for example, several apps without `--product`).
+    #[error("{0}")]
+    UsageError(String),
+
+    /// The command completed its setup calls but the SDK could not prove the
+    /// returned lease is valid and trusted.
+    #[error("verification failed: {0}")]
+    VerificationFailed(String),
+
     #[error("{0}")]
     Config(String),
 
@@ -41,3 +51,32 @@ pub enum CliError {
 }
 
 pub type Result<T> = std::result::Result<T, CliError>;
+
+impl CliError {
+    /// Stable exit codes for scripts and agents.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Self::NoToken
+            | Self::Api { status: 401, .. }
+            | Self::Api { status: 403, .. }
+            | Self::UsageError(_) => 2,
+            Self::ConfirmationNotApproved { .. } | Self::ConfirmationTimedOut => 3,
+            _ => 1,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CliError;
+
+    #[test]
+    fn setup_error_exit_codes_are_stable() {
+        assert_eq!(CliError::UsageError("choose an app".into()).exit_code(), 2);
+        assert_eq!(
+            CliError::VerificationFailed("bad lease".into()).exit_code(),
+            1
+        );
+        assert_eq!(CliError::ConfirmationTimedOut.exit_code(), 3);
+    }
+}
