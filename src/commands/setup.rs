@@ -320,12 +320,12 @@ fn verify_license(
         }
     }
 
-    let keylight = keylight::Keylight::with_parts(
+    let sdk = keylight::Keylight::with_parts(
         config,
         Arc::new(EphemeralStore::default()),
         Arc::new(transport),
     );
-    let activation = keylight
+    let activation = sdk
         .activate(&check.license_key)
         .map_err(|error| CliError::VerificationFailed(error.to_string()))?;
     if !activation.activated {
