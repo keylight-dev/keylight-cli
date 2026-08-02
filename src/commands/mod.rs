@@ -6,6 +6,7 @@ pub mod login;
 pub mod logout;
 pub mod misc;
 pub mod products;
+pub mod setup;
 
 use crate::api::ApiClient;
 use crate::config;
