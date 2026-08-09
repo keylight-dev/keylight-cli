@@ -15,9 +15,11 @@ pub mod config;
 pub mod confirmation;
 pub mod device_auth;
 pub mod endpoints;
+pub mod env_file;
 pub mod error;
 pub mod http;
 pub mod output;
+pub mod project_detect;
 pub mod sleep;
 pub mod telemetry;
 #[cfg(test)]

@@ -16,6 +16,7 @@ use clap::{Parser, Subcommand};
 use keylight_cli::commands::{self, Context, Deps};
 use keylight_cli::config;
 use std::io::IsTerminal;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -48,6 +49,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Set Keylight up in the current project — pick SDK or API and wire it up.
+    Init {
+        /// Force the integration mode instead of auto-detecting the project.
+        #[arg(long, value_parser = ["sdk", "api"])]
+        mode: Option<String>,
+        /// App to wire up (API mode). Optional when the tenant has exactly one.
+        #[arg(long)]
+        product: Option<String>,
+        /// Project directory to inspect and write into. Defaults to the CWD.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+        /// Env file to write the runtime token into (API mode).
+        #[arg(long, default_value = ".env")]
+        env_file: String,
+    },
     /// Authorize the CLI via your browser
     Login {
         /// Permission to request; repeat for several. Defaults to every
@@ -154,6 +170,12 @@ fn main() {
     let deps = Deps::real();
 
     let result = match cli.command {
+        Command::Init {
+            mode,
+            product,
+            dir,
+            env_file,
+        } => commands::init::init(&ctx, &deps, mode, product, dir, env_file),
         Command::Login { scope } => commands::login::login(&ctx, &deps, scope),
         Command::Logout => commands::logout::logout(&ctx, &deps),
         Command::Auth { command } => match command {

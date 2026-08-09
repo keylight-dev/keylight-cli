@@ -1,7 +1,7 @@
 //! `keylight setup …` — checks a human runs once, at setup time.
 
-use super::{Context, Deps, run_gated};
-use crate::api::ApiOutcome;
+use super::{Context, Deps, run_gated, secret_from_env};
+use crate::api::{ApiClient, ApiOutcome};
 use crate::error::{CliError, Result};
 use clap::Subcommand;
 use std::collections::HashMap;
@@ -9,6 +9,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 const SETUP_CHECK: &str = "Setup check";
+/// The device_id the API connection test activates under. A fixed, obviously
+/// synthetic value so the row is recognizable and a re-run reuses the same seat.
+const SETUP_DEVICE_ID: &str = "keylight-setup-check";
+/// The env var holding the app's `licenses:runtime` token for the API test.
+/// Deliberately distinct from `KEYLIGHT_API_TOKEN` (the CLI's own management
+/// auth): the two are different tokens with different scopes, and reading the
+/// runtime token from the management var would either shadow the login or fail
+/// minting with a scope error. `keylight init` writes both and names this one.
+const RUNTIME_TOKEN_ENV: &str = "KEYLIGHT_RUNTIME_TOKEN";
 
 #[derive(Subcommand)]
 pub enum SetupCommand {
@@ -25,6 +34,25 @@ pub enum SetupCommand {
         #[arg(long)]
         keep: bool,
     },
+    /// Prove an API-mode app works end to end over plain HTTPS — no SDK. Mints a
+    /// test license with your CLI login, then activates and validates it through
+    /// the `/v1/licenses` runtime endpoints using your server-side
+    /// `licenses:runtime` token, prints the JSON, and cleans up.
+    VerifyApi {
+        /// App to verify. Optional when the tenant has exactly one.
+        #[arg(long)]
+        product: Option<String>,
+        /// Env var holding the app's `licenses:runtime` bearer token. Read from
+        /// the environment, never a flag, so it stays out of shell history.
+        #[arg(long, default_value = RUNTIME_TOKEN_ENV)]
+        token_env: String,
+        /// device_id to activate under. Defaults to a fixed setup-check id.
+        #[arg(long)]
+        device_id: Option<String>,
+        /// Keep the test license and device instead of cleaning them up.
+        #[arg(long)]
+        keep: bool,
+    },
 }
 
 pub fn run(ctx: &Context, deps: &Deps, cmd: SetupCommand) -> Result<()> {
@@ -34,6 +62,12 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: SetupCommand) -> Result<()> {
             clean,
             keep,
         } => verify_license(ctx, deps, product.as_deref(), clean, keep),
+        SetupCommand::VerifyApi {
+            product,
+            token_env,
+            device_id,
+            keep,
+        } => verify_api(ctx, deps, product.as_deref(), &token_env, device_id, keep),
     }
 }
 
@@ -346,6 +380,145 @@ fn verify_license(
     offer_cleanup(ctx, deps, &outcome, clean, keep)
 }
 
+// --------------------------------------------------------------------------
+// API-mode connection test (`setup verify-api`)
+//
+// The HTTPS-only analog of verify-license: no Keylight SDK is imported.
+// Minting and cleanup use the CLI's management login; the activate/validate
+// pair uses the app's own `licenses:runtime` token, exercising the exact path
+// a server-side integration takes.
+// --------------------------------------------------------------------------
+
+fn verify_api(
+    ctx: &Context,
+    deps: &Deps,
+    product: Option<&str>,
+    token_env: &str,
+    device_id: Option<String>,
+    keep: bool,
+) -> Result<()> {
+    let runtime_token = secret_from_env(token_env)?;
+    let management = ctx.client(deps)?;
+    let product_id = resolve_product(ctx, deps, product)?;
+    let tenant_id = resolve_tenant_id(ctx, deps)?;
+    let device_id = device_id.unwrap_or_else(|| SETUP_DEVICE_ID.to_string());
+
+    // A throwaway license, minted with the management login.
+    let check = mint_setup_license(ctx, deps, &tenant_id, &product_id)?;
+
+    // The runtime client speaks the clean-JSON /v1/licenses surface with the
+    // app's own token — a different credential and scope from the management
+    // login above, which is exactly what this command exists to prove.
+    let runtime = ApiClient::new(
+        deps.transport.clone(),
+        deps.sleeper.clone(),
+        ctx.api_url.clone(),
+        runtime_token,
+    );
+
+    let proof = run_api_proof(&runtime, &product_id, &check.license_key, &device_id);
+
+    // Always tidy up unless asked to keep — even when the proof failed, so a
+    // refused activation never leaves an orphaned license behind. Best-effort:
+    // a cleanup failure is a warning, since the proof's own result is what
+    // this command reports.
+    if !keep {
+        let body = runtime_body(&product_id, &check.license_key, &device_id);
+        if let Err(error) = runtime.call("POST", "/v1/licenses/deactivate", Some(&body), None) {
+            eprintln!("Could not release the setup-check device: {error}");
+        }
+        if let Err(error) = run_gated(
+            ctx,
+            deps,
+            &management,
+            "POST",
+            &format!("/v1/licenses/{}/revoke", check.license_id),
+            None,
+        ) {
+            eprintln!("Could not revoke the setup-check license: {error}");
+        }
+    }
+
+    let (activate, validate) = proof?;
+    report_api(
+        ctx,
+        &product_id,
+        &check.display_key,
+        &activate,
+        &validate,
+        keep,
+    );
+    Ok(())
+}
+
+/// The shared request body for the three runtime endpoints — the clean-JSON
+/// contract is snake_case `product_id` / `license_key` / `device_id`.
+fn runtime_body(product_id: &str, license_key: &str, device_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "product_id": product_id,
+        "license_key": license_key,
+        "device_id": device_id,
+    })
+}
+
+/// Activate, then validate, over HTTPS. Returns both responses on success. A
+/// clean `valid:false` is still a failed proof — the point is a usable license,
+/// not merely a well-formed answer.
+fn run_api_proof(
+    runtime: &ApiClient,
+    product_id: &str,
+    license_key: &str,
+    device_id: &str,
+) -> Result<(serde_json::Value, serde_json::Value)> {
+    let body = runtime_body(product_id, license_key, device_id);
+    let activate = json_ok(runtime.call("POST", "/v1/licenses/activate", Some(&body), None)?)?;
+    let validate = json_ok(runtime.call("POST", "/v1/licenses/validate", Some(&body), None)?)?;
+    if validate.get("valid").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(CliError::VerificationFailed(format!(
+            "the runtime API returned valid=false: {validate}"
+        )));
+    }
+    Ok((activate, validate))
+}
+
+fn report_api(
+    ctx: &Context,
+    product_id: &str,
+    display_key: &str,
+    activate: &serde_json::Value,
+    validate: &serde_json::Value,
+    kept: bool,
+) {
+    crate::output::emit(
+        ctx.json,
+        &serde_json::json!({
+            "verified": true,
+            "productId": product_id,
+            "activate": activate,
+            "validate": validate,
+        }),
+        |_| {
+            println!("Verified over HTTPS. Your API-mode app can license without an SDK.");
+            println!();
+            println!("  product   {product_id}");
+            println!("  activate  {}", compact(activate));
+            println!("  validate  {}", compact(validate));
+            if kept {
+                println!();
+                println!(
+                    "  test license {display_key} kept (customer: {SETUP_CHECK}). \
+                     Delete it from the dashboard when you're done."
+                );
+            }
+        },
+    );
+}
+
+/// One-line JSON for the human view; the full objects still go out under --json.
+fn compact(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+}
+
 fn outcome_from_check(check: &SetupCheck) -> VerifyOutcome {
     VerifyOutcome {
         license_id: check.license_id.clone(),
@@ -620,5 +793,141 @@ mod tests {
         cleanup(&c);
         assert_eq!(reused.license_key, "FNGR-AAAA");
         assert!(t.requests.lock().unwrap().is_empty());
+    }
+
+    // ---- setup verify-api (the HTTPS-only connection test) ----------------
+
+    static RUNTIME_ENV: Mutex<()> = Mutex::new(());
+
+    fn set_runtime_token(v: &str) {
+        unsafe { std::env::set_var(RUNTIME_TOKEN_ENV, v) };
+    }
+    fn clear_runtime_token() {
+        unsafe { std::env::remove_var(RUNTIME_TOKEN_ENV) };
+    }
+
+    /// The headline path: mint with the login, then activate + validate over
+    /// the runtime endpoints with the app's own token. The activate call must
+    /// carry the snake_case runtime body and the runtime token — proving the
+    /// two credentials are genuinely separate.
+    #[test]
+    fn verify_api_activates_and_validates_over_https() {
+        let _g = RUNTIME_ENV.lock().unwrap();
+        set_runtime_token("klm_runtime");
+        let t = transport(vec![
+            resp(
+                200,
+                r#"{"items":[{"productId":"fingerhat"}],"nextCursor":null}"#,
+                None,
+            ),
+            resp(200, r#"{"tenantId":"tenant-1"}"#, None),
+            resp(
+                201,
+                r#"{"licenseKey":"FNGR-AAAA-BBBB-CCCC-DDDD","license":{"id":"license-id","displayKey":"FNGR-****-DDDD"}}"#,
+                None,
+            ),
+            resp(200, r#"{"activated":true,"status":"active"}"#, None),
+            resp(
+                200,
+                r#"{"valid":true,"status":"active","entitlements":{}}"#,
+                None,
+            ),
+        ]);
+        let o = RecordingOpener::new();
+        let d = deps(&t, &o);
+        let c = ctx(true);
+        verify_api(&c, &d, None, RUNTIME_TOKEN_ENV, None, true).unwrap();
+        cleanup(&c);
+        clear_runtime_token();
+
+        let reqs = t.requests.lock().unwrap();
+        assert_eq!(
+            reqs.len(),
+            5,
+            "products, verify, mint, activate, validate — no cleanup under --keep"
+        );
+        // The mint uses the management login...
+        assert!(reqs[2].1.ends_with("/v1/licenses"));
+        assert!(
+            reqs[2]
+                .2
+                .contains(&("Authorization".to_string(), "Bearer klm_test".to_string()))
+        );
+        // ...and the activate uses the app's runtime token + snake_case body.
+        let (method, url, headers, body) = &reqs[3];
+        assert_eq!(method, "POST");
+        assert!(url.ends_with("/v1/licenses/activate"), "got {url}");
+        let sent: serde_json::Value = serde_json::from_str(body.as_deref().unwrap()).unwrap();
+        assert_eq!(sent["product_id"], "fingerhat");
+        assert_eq!(sent["license_key"], "FNGR-AAAA-BBBB-CCCC-DDDD");
+        assert_eq!(sent["device_id"], SETUP_DEVICE_ID);
+        assert!(
+            headers.contains(&(
+                "Authorization".to_string(),
+                "Bearer klm_runtime".to_string()
+            )),
+            "the runtime call must use the app's token, not the management login"
+        );
+        assert!(reqs[4].1.ends_with("/v1/licenses/validate"));
+    }
+
+    /// A well-formed `valid:false` is still a failed proof — and a failed proof
+    /// must not leave the throwaway license behind.
+    #[test]
+    fn verify_api_treats_valid_false_as_a_failure_and_still_cleans_up() {
+        let _g = RUNTIME_ENV.lock().unwrap();
+        set_runtime_token("klm_runtime");
+        let t = transport(vec![
+            resp(200, r#"{"items":[{"productId":"fingerhat"}]}"#, None),
+            resp(200, r#"{"tenantId":"tenant-1"}"#, None),
+            resp(
+                201,
+                r#"{"licenseKey":"FNGR-AAAA","license":{"id":"license-id","displayKey":"FNGR-****"}}"#,
+                None,
+            ),
+            resp(200, r#"{"activated":true,"status":"active"}"#, None),
+            resp(
+                200,
+                r#"{"valid":false,"status":"revoked","reason":"revoked"}"#,
+                None,
+            ),
+            resp(200, r#"{"deactivated":true}"#, None),
+            resp(200, r#"{}"#, None),
+        ]);
+        let o = RecordingOpener::new();
+        let d = deps(&t, &o);
+        let c = ctx(true);
+        let err = verify_api(&c, &d, None, RUNTIME_TOKEN_ENV, None, false).unwrap_err();
+        cleanup(&c);
+        clear_runtime_token();
+
+        assert!(matches!(err, CliError::VerificationFailed(_)));
+        let reqs = t.requests.lock().unwrap();
+        assert_eq!(
+            reqs.len(),
+            7,
+            "must deactivate + revoke even after a failed proof"
+        );
+        assert!(reqs[5].1.ends_with("/v1/licenses/deactivate"));
+        assert!(reqs[6].1.ends_with("/revoke"));
+    }
+
+    /// The whole point is HTTPS-with-a-token; without one there's nothing to
+    /// test, and it must fail before touching the network.
+    #[test]
+    fn verify_api_requires_the_runtime_token() {
+        let _g = RUNTIME_ENV.lock().unwrap();
+        clear_runtime_token();
+        let t = transport(vec![]);
+        let o = RecordingOpener::new();
+        let d = deps(&t, &o);
+        let c = ctx(true);
+        let err = verify_api(&c, &d, None, RUNTIME_TOKEN_ENV, None, true).unwrap_err();
+        cleanup(&c);
+        assert!(matches!(err, CliError::Config(_)));
+        assert!(
+            t.requests.lock().unwrap().is_empty(),
+            "no calls should happen without the runtime token"
+        );
     }
 }

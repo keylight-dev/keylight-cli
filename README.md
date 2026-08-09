@@ -142,12 +142,32 @@ than leaving a credential on disk you believe is gone.
 
 ## Commands
 
+### init
+
+```bash
+keylight init                     # detect the project, recommend SDK or API
+keylight init --mode api          # wire up API mode: mint a token, write .env
+keylight init --mode sdk          # print the SDK setup steps instead
+```
+
+`init` looks at the project and forks on integration style. A native app (Tauri, Xcode,
+Cargo) is pointed at an **SDK**; a server (Next.js / Node) is pointed at the **API**. The
+recommendation is advice — `--mode` always wins, and a browser/client project that picks API
+anyway is warned (never embed a `licenses:runtime` token in code you ship), never blocked.
+
+The API branch mints a `licenses:runtime` credential through the browser device flow, writes it
+to `.env` as `KEYLIGHT_API_TOKEN` (owner-only, added to `.gitignore` in a git repo), and prints
+a copy-ready `curl`. The token is the app's server-side secret — it is never stored in the CLI's
+own config.
+
 ### products
 
 ```bash
 keylight products list
 keylight products get my-app
 keylight products create --display-name "My App" --key-prefix MYAP --support-email help@myapp.com
+keylight products create --display-name "My API App" --key-prefix MYAP \
+  --support-email help@myapp.com --integration-mode api
 keylight products update my-app --purchase-url https://myapp.com/buy
 keylight products free-tier set my-app --enabled
 keylight products test-mode disable my-app
@@ -281,6 +301,20 @@ returned lease against the tenant keyset. It does not modify application code
 or count as product usage. The check is identified as `Setup check`; a local,
 owner-only state file retains its plaintext key only until `--clean` removes
 the device and revokes the license.
+
+### setup verify-api
+
+```bash
+export KEYLIGHT_RUNTIME_TOKEN=klm_...          # the app's licenses:runtime token
+keylight setup verify-api --product my-app
+```
+
+The HTTPS-only counterpart to `verify-license` — no SDK involved. It mints a test license with
+your CLI login, then `activate`s and `validate`s it through the `/v1/licenses` runtime endpoints
+using your server-side runtime token, prints the JSON, and cleans up (unless `--keep`). This is
+the exact path an API-mode integration takes. The runtime token is read from
+`KEYLIGHT_RUNTIME_TOKEN` (override with `--token-env`) — kept distinct from the CLI's own
+`KEYLIGHT_API_TOKEN` management auth, which mints and cleans up.
 
 ## `--json`
 
