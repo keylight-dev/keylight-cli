@@ -10,6 +10,31 @@ against.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-10
+
+### Added
+
+- **`keylight init`.** Sets Keylight up in the current project and forks on
+  integration style. It inspects the project (Tauri/Xcode/Cargo → SDK;
+  Next.js/Node → API), recommends a mode, and walks the chosen path — an SDK
+  project is never asked about the API and vice versa. The recommendation is
+  advice, never a gate: `--mode` wins, and a browser/client project that
+  chooses API is warned against embedding the token, not blocked.
+- **API-mode credential wiring.** `init --mode api` mints a `licenses:runtime`
+  token through the browser device flow (scoped to exactly that one
+  permission), writes it to `.env` as `KEYLIGHT_API_TOKEN` (owner-only, added
+  to `.gitignore` in a git repo), and prints a copy-ready `curl`. The token is
+  the app's server-side secret and is never stored in the CLI's own config.
+- **`keylight setup verify-api`.** The HTTPS-only counterpart to
+  `verify-license` — no SDK. Mints a test license with your CLI login, then
+  activates and validates it through the `/v1/licenses` runtime endpoints with
+  the app's runtime token, prints the JSON, and cleans up. The runtime token is
+  read from `KEYLIGHT_RUNTIME_TOKEN`, kept distinct from the management auth so
+  the two credentials never shadow each other.
+- **`keylight products create --integration-mode <sdk|api>`.** Creates an app
+  in the chosen integration mode (default `sdk`), forwarding the field to the
+  same endpoint the dashboard uses.
+
 ## [0.1.3] - 2026-08-02
 
 ### Added

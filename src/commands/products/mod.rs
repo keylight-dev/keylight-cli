@@ -45,6 +45,10 @@ pub enum ProductsCommand {
         /// Which SDK this app uses.
         #[arg(long)]
         sdk: Option<String>,
+        /// How the app talks to Keylight: `sdk` (ship a Keylight SDK) or `api`
+        /// (call the HTTP API directly, no SDK). Defaults to `sdk` server-side.
+        #[arg(long, value_parser = ["sdk", "api"])]
+        integration_mode: Option<String>,
     },
     /// Change an app's support email or purchase URL. Those are the only two
     /// fields the API accepts on update.
@@ -141,6 +145,7 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: ProductsCommand) -> Result<()> {
             support_email,
             purchase_url,
             sdk,
+            integration_mode,
         } => create(
             ctx,
             deps,
@@ -149,6 +154,7 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: ProductsCommand) -> Result<()> {
             &support_email,
             purchase_url,
             sdk,
+            integration_mode,
         ),
         ProductsCommand::Update {
             product_id,
@@ -242,6 +248,7 @@ fn get(ctx: &Context, deps: &Deps, product_id: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create(
     ctx: &Context,
     deps: &Deps,
@@ -250,6 +257,7 @@ fn create(
     support_email: &str,
     purchase_url: Option<String>,
     sdk: Option<String>,
+    integration_mode: Option<String>,
 ) -> Result<()> {
     let client = ctx.client(deps)?;
     let body = json_body(vec![
@@ -258,6 +266,7 @@ fn create(
         ("supportEmail", Some(support_email.into())),
         ("purchaseURL", purchase_url.map(Into::into)),
         ("sdk", sdk.map(Into::into)),
+        ("integrationMode", integration_mode.map(Into::into)),
     ]);
     let value = run_gated(ctx, deps, &client, "POST", "/v1/products", Some(&body))?;
     emit(ctx.json, &value, print_product);
@@ -459,6 +468,7 @@ mod tests {
             "help@x.com",
             Some("https://buy.example".into()),
             None,
+            None,
         )
         .unwrap();
         cleanup(&c);
@@ -476,9 +486,40 @@ mod tests {
             "an unsupplied optional must be absent, not null"
         );
         assert!(
+            !sent.as_object().unwrap().contains_key("integrationMode"),
+            "an unsupplied integration mode must be absent, not null — the \
+             server defaults it to sdk"
+        );
+        assert!(
             !sent.as_object().unwrap().contains_key("id"),
             "there is no client-supplied id field on this endpoint"
         );
+    }
+
+    /// An API-mode app is created by passing `integrationMode` straight through
+    /// to the same endpoint — no separate route, mirroring the dashboard.
+    #[test]
+    fn create_forwards_the_api_integration_mode() {
+        let t = transport(vec![resp(201, PRODUCT, None)]);
+        let o = RecordingOpener::new();
+        let d = deps(&t, &o);
+        let c = ctx(true);
+        create(
+            &c,
+            &d,
+            "My App",
+            "MYAP",
+            "help@x.com",
+            None,
+            None,
+            Some("api".into()),
+        )
+        .unwrap();
+        cleanup(&c);
+
+        let (_, _, body) = request_at(&t, 0);
+        let sent: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        assert_eq!(sent["integrationMode"], "api");
     }
 
     #[test]
