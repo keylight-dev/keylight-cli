@@ -1,7 +1,7 @@
 [package]
 name = "keylight-cli"
 description = "Keylight management CLI — configure apps, key types, licenses, and payment integrations from the terminal"
-version = "0.1.3"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"

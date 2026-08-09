@@ -10,6 +10,8 @@ against.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-09
+
 ### Added
 
 - **`keylight init`.** Sets Keylight up in the current project and forks on
