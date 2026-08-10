@@ -121,9 +121,24 @@ fn confirm_opts<'a>(ctx: &Context, deps: &'a Deps<'a>) -> ConfirmOptions<'a> {
     }
 }
 
+/// A `403` whose body says exactly `Missing scope: danger` — the one condition
+/// the auto step-up heals. Any other missing scope is a real authorization gap
+/// the user must resolve by re-logging with the right resource scopes.
+fn is_missing_danger(err: &crate::error::CliError) -> bool {
+    matches!(
+        err,
+        crate::error::CliError::Api { status: 403, message } if message == "Missing scope: danger"
+    )
+}
+
 /// Run a call that may be confirm-gated, walking the approval flow if the
 /// server answers `202`. Ungated endpoints go through unchanged, so a command
 /// never has to know which tier it is calling.
+///
+/// A `403 Missing scope: danger` triggers one auto step-up: grant the danger
+/// scope through the existing device flow, rebuild the client from the
+/// freshly stored token, and retry once. Any other error — including any
+/// other missing scope — surfaces unchanged.
 pub fn run_gated(
     ctx: &Context,
     deps: &Deps,
@@ -132,7 +147,14 @@ pub fn run_gated(
     path: &str,
     body: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value> {
-    run_confirmable(client, method, path, body, &confirm_opts(ctx, deps))
+    match run_confirmable(client, method, path, body, &confirm_opts(ctx, deps)) {
+        Err(e) if is_missing_danger(&e) => {
+            stepup::grant_danger(ctx, deps)?;
+            let client = ctx.client(deps)?; // rebuilt from the freshly stored token
+            run_confirmable(&client, method, path, body, &confirm_opts(ctx, deps))
+        }
+        other => other,
+    }
 }
 
 /// As [`run_gated`], but returns the success body verbatim. Only
@@ -145,7 +167,14 @@ pub fn run_gated_raw(
     path: &str,
     body: Option<&serde_json::Value>,
 ) -> Result<String> {
-    run_confirmable_raw(client, method, path, body, &confirm_opts(ctx, deps))
+    match run_confirmable_raw(client, method, path, body, &confirm_opts(ctx, deps)) {
+        Err(e) if is_missing_danger(&e) => {
+            stepup::grant_danger(ctx, deps)?;
+            let client = ctx.client(deps)?;
+            run_confirmable_raw(&client, method, path, body, &confirm_opts(ctx, deps))
+        }
+        other => other,
+    }
 }
 
 /// Append the query parameters that were actually supplied.
@@ -405,5 +434,116 @@ mod tests {
     fn json_body_with_nothing_supplied_is_an_empty_object() {
         let body = json_body(vec![("a", None), ("b", None)]);
         assert_eq!(body, serde_json::json!({}));
+    }
+}
+
+#[cfg(test)]
+mod run_gated_tests {
+    use super::*;
+    use crate::confirmation::Opener;
+    use crate::sleep::NoopSleeper;
+    use crate::test_support::{ScriptedTransport, resp};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    struct NoopOpener;
+    impl Opener for NoopOpener {
+        fn open(&self, _url: &str) {}
+    }
+
+    fn ctx_with_token() -> Context {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!("keylight-cli-rungated-{n}.toml"));
+        config::write_config(
+            &path,
+            &config::ConfigFile {
+                token: Some("klm_old".into()),
+            },
+        )
+        .unwrap();
+        Context {
+            json: true,
+            no_browser: true,
+            api_url: "https://api.test".into(),
+            config_path: path,
+            is_tty: false,
+        }
+    }
+
+    // 403 danger -> step-up (verify, device start, approved w/ danger) ->
+    // retry -> 202 confirmation -> poll approved -> final 200.
+    #[test]
+    fn missing_danger_triggers_stepup_then_retries_to_success() {
+        static OPENER: NoopOpener = NoopOpener;
+        let transport = Arc::new(ScriptedTransport::new(vec![
+            resp(403, r#"{"error":"Missing scope: danger"}"#, None), // initial revoke
+            resp(
+                200,
+                r#"{"tenantId":"t1","tokenId":"tok1","scopes":["licenses:write"]}"#,
+                None,
+            ), // verify
+            resp(
+                200,
+                r#"{"device_code":"d","user_code":"AB-12","verification_uri":"https://app.keylight.dev/login/device","verification_uri_complete":"https://app.keylight.dev/login/device?code=AB-12","interval":5,"expires_in":900}"#,
+                None,
+            ), // device start
+            resp(
+                200,
+                r#"{"status":"approved","token":"klm_danger","scopes":["licenses:write","danger"],"name":"l"}"#,
+                None,
+            ), // poll approved
+            resp(
+                202,
+                r#"{"confirmation":{"id":"c1","status":"pending","approveUrl":"https://app.keylight.dev/c/c1","expiresInSeconds":600}}"#,
+                None,
+            ), // retried revoke: gated
+            resp(200, r#"{"status":"approved"}"#, Some(0)),          // confirmation poll
+            resp(200, r#"{"revoked":true}"#, None),                  // confirmed revoke
+        ]));
+        let deps = Deps {
+            transport: transport.clone(),
+            sleeper: Arc::new(NoopSleeper::default()),
+            opener: &OPENER,
+            max_polls: Some(10),
+        };
+        let ctx = ctx_with_token();
+        let client = ctx.client(&deps).unwrap();
+
+        let out = run_gated(&ctx, &deps, &client, "POST", "/v1/licenses/L1/revoke", None).unwrap();
+        assert_eq!(out["revoked"], true);
+
+        let _ = config::delete_config(&ctx.config_path);
+    }
+
+    // A non-danger missing scope is surfaced unchanged: no step-up attempted.
+    #[test]
+    fn other_missing_scope_is_not_auto_healed() {
+        static OPENER: NoopOpener = NoopOpener;
+        let transport = Arc::new(ScriptedTransport::new(vec![resp(
+            403,
+            r#"{"error":"Missing scope: licenses:write"}"#,
+            None,
+        )]));
+        let deps = Deps {
+            transport: transport.clone(),
+            sleeper: Arc::new(NoopSleeper::default()),
+            opener: &OPENER,
+            max_polls: Some(10),
+        };
+        let ctx = ctx_with_token();
+        let client = ctx.client(&deps).unwrap();
+
+        let err =
+            run_gated(&ctx, &deps, &client, "POST", "/v1/licenses/L1/revoke", None).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::CliError::Api { status: 403, .. }
+        ));
+        // Only the one call was made — no verify/device-start followed.
+        assert_eq!(transport.requests.lock().unwrap().len(), 1);
+
+        let _ = config::delete_config(&ctx.config_path);
     }
 }
