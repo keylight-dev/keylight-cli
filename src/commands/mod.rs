@@ -8,6 +8,7 @@ pub mod logout;
 pub mod misc;
 pub mod products;
 pub mod setup;
+pub mod stepup;
 
 use crate::api::ApiClient;
 use crate::config;
