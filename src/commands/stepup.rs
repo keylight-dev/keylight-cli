@@ -23,15 +23,23 @@ fn scopes_with_danger(current: &[String]) -> Vec<String> {
     out
 }
 
+/// Whether an env-supplied token would override the stored config token.
+/// Mirrors `config::resolve_token`: an empty value is not effective.
+fn env_token_overrides(env_token: Option<String>) -> bool {
+    env_token.filter(|s| !s.is_empty()).is_some()
+}
+
 /// Re-authorize the CLI for `danger` (browser page 1). On success the config
 /// file holds a fresh token carrying `danger`; the caller rebuilds its client
 /// and retries the original call, which then reaches the normal confirmation
 /// flow (page 2).
 pub fn grant_danger(ctx: &Context, deps: &Deps) -> Result<()> {
-    // A token from the environment wins over the config file, so re-authorizing
-    // into the config would have no effect — fail with the real remedy instead
-    // of silently looping into a second 403.
-    if ctx.env_token().is_some() {
+    // A non-empty token from the environment wins over the config file, so
+    // re-authorizing into the config would have no effect — fail with the
+    // real remedy instead of silently looping into a second 403. An empty
+    // env var is not effective (mirrors `config::resolve_token`), so it must
+    // not trip this guard.
+    if env_token_overrides(ctx.env_token()) {
         return Err(CliError::Config(
             "your token comes from KEYLIGHT_API_TOKEN, which overrides the stored login; \
              reissue that token with the danger scope, or unset it and run `keylight login`"
@@ -54,6 +62,12 @@ pub fn grant_danger(ctx: &Context, deps: &Deps) -> Result<()> {
                 .collect()
         })
         .unwrap_or_default();
+    // An empty scope list here is a malformed response, not "no scopes yet":
+    // requesting the union against it would request `danger` alone, the
+    // exact downgrade the union logic exists to prevent.
+    if current.is_empty() {
+        return Err(CliError::InvalidResponse);
+    }
     let requested = scopes_with_danger(&current);
 
     // Page 1: the existing device-flow grant page, now showing the danger toggle.
@@ -121,6 +135,23 @@ mod tests {
     fn appends_danger_to_an_empty_scope_set() {
         let got = scopes_with_danger(&[]);
         assert_eq!(got, vec!["danger"]);
+    }
+
+    #[test]
+    fn env_token_overrides_is_false_when_env_var_is_unset() {
+        assert!(!env_token_overrides(None));
+    }
+
+    #[test]
+    fn env_token_overrides_is_false_for_an_empty_env_var() {
+        // Mirrors `config::resolve_token`: an empty `KEYLIGHT_API_TOKEN`
+        // falls through to the config file rather than overriding it.
+        assert!(!env_token_overrides(Some(String::new())));
+    }
+
+    #[test]
+    fn env_token_overrides_is_true_for_a_non_empty_env_var() {
+        assert!(env_token_overrides(Some("klm_x".to_string())));
     }
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -225,6 +256,37 @@ mod tests {
         // Old token untouched.
         let cfg = config::read_config(&ctx.config_path).unwrap();
         assert_eq!(cfg.token.as_deref(), Some("klm_old"));
+
+        let _ = config::delete_config(&ctx.config_path);
+    }
+
+    #[test]
+    fn grant_danger_rejects_an_empty_scopes_list_from_verify() {
+        // An empty `scopes` array is a malformed response, not "no scopes
+        // yet" — proceeding would request `["danger"]` alone, the exact
+        // downgrade the union logic exists to prevent.
+        const VERIFY_EMPTY_SCOPES: &str = r#"{"tenantId":"t1","tokenId":"tok1","scopes":[]}"#;
+        let transport = Arc::new(ScriptedTransport::new(vec![resp(
+            200,
+            VERIFY_EMPTY_SCOPES,
+            None,
+        )]));
+        let opener = RecordingOpener {
+            opened: Mutex::new(Vec::new()),
+        };
+        let deps = deps_with(transport.clone(), &opener);
+        let ctx = stepup_ctx(true, false);
+
+        let err = grant_danger(&ctx, &deps).unwrap_err();
+        assert!(matches!(err, CliError::InvalidResponse));
+
+        // No device-start call was made — the guard fired before requesting.
+        let reqs = transport.requests.lock().unwrap();
+        assert!(
+            !reqs.iter().any(|r| r.1.ends_with("/v1/login/device")),
+            "must not start a device flow after a malformed verify response"
+        );
+        assert_eq!(reqs.len(), 1, "only the verify call should have been made");
 
         let _ = config::delete_config(&ctx.config_path);
     }

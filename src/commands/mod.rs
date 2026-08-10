@@ -514,6 +514,18 @@ mod run_gated_tests {
         let out = run_gated(&ctx, &deps, &client, "POST", "/v1/licenses/L1/revoke", None).unwrap();
         assert_eq!(out["revoked"], true);
 
+        // The retried revoke — the final recorded request — must carry the
+        // freshly granted token, not the pre-step-up one: step-up rebuilds
+        // the client from the stored config, and a stale token here would
+        // mean the retry never actually picked up the new grant.
+        let reqs = transport.requests.lock().unwrap();
+        let (_, _, last_headers, _) = reqs.last().unwrap();
+        assert!(
+            last_headers.contains(&("Authorization".to_string(), "Bearer klm_danger".to_string())),
+            "expected the retried request to carry the new token, got headers: {last_headers:?}"
+        );
+        drop(reqs);
+
         let _ = config::delete_config(&ctx.config_path);
     }
 
