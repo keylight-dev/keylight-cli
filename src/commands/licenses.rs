@@ -720,6 +720,10 @@ mod tests {
     fn generated_idempotency_keys_differ_between_calls() {
         let keys: std::collections::HashSet<String> =
             (0..1000).map(|_| generated_idempotency_key()).collect();
-        assert_eq!(keys.len(), 1000, "idempotency keys collided within a process");
+        assert_eq!(
+            keys.len(),
+            1000,
+            "idempotency keys collided within a process"
+        );
     }
 }
