@@ -11,6 +11,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all-targets
+      - name: Serialized tests that mutate process-global env vars
+        run: cargo test -- --ignored --test-threads=1
       # The coverage guard is what keeps the command surface honest as the API
       # grows, so it gets named explicitly rather than hiding inside the run
       # above — a silent regression here is the one this repo most cares about.

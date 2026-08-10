@@ -324,16 +324,27 @@ fn mint(
 
 /// A per-invocation idempotency key.
 ///
-/// Process id plus the wall clock is enough: the key only has to be unique
-/// against *this* caller's other attempts within the server's replay window,
-/// and two invocations cannot share both. Deliberately not a UUID — that
-/// would be a dependency for one string.
+/// Process id plus the wall clock separates this caller's attempts from every
+/// other caller's, within the server's replay window. Deliberately not a UUID —
+/// that would be a dependency for one string.
+///
+/// The trailing counter is what makes it unique *within* a process. The wall
+/// clock alone is not: `SystemTime::now()` reports at the platform's tick
+/// resolution, not per-nanosecond, so two calls close together can read the
+/// same value and produce the same key — which the server would treat as a
+/// replay and silently issue nothing for the second. Today `mint()` is the only
+/// caller and runs once per process, so this is a guard rather than a live bug,
+/// but it costs one atomic and removes the footgun from any future loop.
 fn generated_idempotency_key() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("cli-{}-{nanos}", std::process::id())
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("cli-{}-{nanos}-{seq}", std::process::id())
 }
 
 /// Accept either a bare array of rows or `{"rows": [...]}` — both are shapes
@@ -700,8 +711,15 @@ mod tests {
 
     /// Two invocations must not collide, or the second would be silently
     /// treated as a replay of the first and issue nothing.
+    ///
+    /// This used to fail intermittently: back-to-back calls can read the same
+    /// wall clock on a platform whose tick is coarser than the gap between
+    /// them. Looping here makes that case the norm rather than the accident,
+    /// so a regression fails every run instead of one in twenty.
     #[test]
     fn generated_idempotency_keys_differ_between_calls() {
-        assert_ne!(generated_idempotency_key(), generated_idempotency_key());
+        let keys: std::collections::HashSet<String> =
+            (0..1000).map(|_| generated_idempotency_key()).collect();
+        assert_eq!(keys.len(), 1000, "idempotency keys collided within a process");
     }
 }

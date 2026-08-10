@@ -10,6 +10,16 @@ against.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-10
+
+### Fixed
+- Destructive commands (`licenses revoke`, `licenses remint`, `licenses export`,
+  `products key-types delete`, `sdk-key`, `webhook`) no longer dead-end with a
+  raw `403 Missing scope: danger` when your login lacks the destructive-actions
+  permission. The CLI now re-authorizes for it in your browser (keeping every
+  scope you already had), then continues into the normal per-action approval —
+  two quick browser steps instead of an opaque error.
+
 ## [0.2.0] - 2026-08-10
 
 ### Added
