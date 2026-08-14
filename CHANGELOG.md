@@ -10,6 +10,14 @@ against.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-14
+
+### Added
+- Shell completions for bash, zsh, fish, and PowerShell via a hidden
+  `keylight completions <shell>` subcommand, and a man page via a hidden
+  `keylight man` subcommand. Homebrew installs both automatically; anyone
+  else can generate them on demand.
+
 ## [0.2.1] - 2026-08-10
 
 ### Fixed
