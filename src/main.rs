@@ -12,7 +12,7 @@
 //! Drift protection comes from the coverage test instead, which catches the
 //! failure that actually matters — an endpoint no command reaches.
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use keylight_cli::commands::{self, Context, Deps};
 use keylight_cli::config;
 use std::io::IsTerminal;
@@ -124,6 +124,26 @@ enum Command {
         #[command(subcommand)]
         command: commands::misc::WebhookCommand,
     },
+    /// Print a shell completion script to stdout.
+    ///
+    /// Hidden because it is packaging plumbing, not a day-to-day command: the
+    /// Homebrew formula and any manual install run it once to drop the script
+    /// where the shell looks for it.
+    ///
+    ///     keylight completions zsh > ~/.zsh/completions/_keylight
+    #[command(hide = true)]
+    Completions {
+        /// Shell to generate the script for.
+        #[arg(value_name = "SHELL")]
+        shell: clap_complete::Shell,
+    },
+    /// Render the man page (roff for `keylight.1`) to stdout.
+    ///
+    /// Hidden for the same reason as `completions` — the release tarball and
+    /// the Homebrew formula generate `keylight.1` from this; humans read
+    /// `--help`.
+    #[command(hide = true)]
+    Man,
 }
 
 #[derive(Subcommand)]
@@ -153,6 +173,25 @@ fn main() {
             std::process::exit(if e.use_stderr() { 1 } else { 0 });
         }
     };
+    // Completion scripts and the man page are rendered from the parsed command
+    // tree itself, so they need neither a config directory nor the network.
+    // Handle them before either is resolved.
+    match &cli.command {
+        Command::Completions { shell } => {
+            let mut cmd = Cli::command();
+            let bin = cmd.get_name().to_string();
+            clap_complete::generate(*shell, &mut cmd, bin, &mut std::io::stdout());
+            return;
+        }
+        Command::Man => {
+            clap_mangen::Man::new(Cli::command())
+                .render(&mut std::io::stdout())
+                .expect("rendering the man page to stdout cannot fail");
+            return;
+        }
+        _ => {}
+    }
+
     let config_path = match config::config_path() {
         Some(p) => p,
         None => {
@@ -197,6 +236,10 @@ fn main() {
         }
         Command::Usage { days } => commands::misc::run_usage(&ctx, &deps, days),
         Command::Webhook { command } => commands::misc::run_webhook(&ctx, &deps, command),
+        // Rendered and returned above, before any config/network work.
+        Command::Completions { .. } | Command::Man => {
+            unreachable!("completions/man are handled before dispatch")
+        }
     };
 
     if let Err(e) = result {

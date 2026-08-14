@@ -50,6 +50,53 @@ fn no_subcommand_fails_with_usage() {
 }
 
 #[test]
+fn completions_and_man_stay_hidden_from_help() {
+    let assert = Command::cargo_bin("keylight")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    // The commands list is rendered one-per-line as `  <name>  <about>`; neither
+    // packaging command should appear there.
+    assert!(!stdout.contains("\n  completions"), "got: {stdout}");
+    assert!(!stdout.contains("\n  man "), "got: {stdout}");
+}
+
+#[test]
+fn completions_generate_a_shell_script_for_each_shell() {
+    for (shell, needle) in [
+        ("bash", "_keylight()"),
+        ("zsh", "#compdef keylight"),
+        ("fish", "complete -c keylight"),
+        ("powershell", "Register-ArgumentCompleter"),
+    ] {
+        let assert = Command::cargo_bin("keylight")
+            .unwrap()
+            .args(["completions", shell])
+            .assert()
+            .success();
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        assert!(
+            stdout.contains(needle),
+            "{shell} completions, got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn man_renders_a_roff_page() {
+    let assert = Command::cargo_bin("keylight")
+        .unwrap()
+        .arg("man")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains(".TH keylight 1"), "got: {stdout}");
+    assert!(stdout.contains(".SH NAME"), "got: {stdout}");
+}
+
+#[test]
 fn logout_with_nothing_stored_makes_no_network_call_and_reports_it() {
     let home = tempfile::tempdir().unwrap();
     let assert = isolated_cmd(home.path())

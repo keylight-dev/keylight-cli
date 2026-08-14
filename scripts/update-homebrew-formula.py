@@ -16,6 +16,20 @@ Verify without writing anything:
 
 The release workflow runs this after the binaries job, so the assets it
 checksums are the ones that were just published.
+
+This script only moves the formula to a new version (URLs + sha256). It does
+NOT own the `install do` block. For shell completions and the man page to be
+installed, the formula in keylight-dev/homebrew-tap must run the installed
+binary — the CLI exposes a hidden `completions <shell>` and a hidden `man`
+subcommand for exactly this. Add these two lines to the formula's `install`
+method (once; they are version-independent):
+
+    generate_completions_from_executable(bin/"keylight", "completions")
+    (man1/"keylight.1").write Utils.safe_popen_read(bin/"keylight", "man")
+
+The release also ships prebuilt `keylight.1` and `keylight.{bash,fish,ps1}` /
+`_keylight` assets, so a manual or distro install can drop them in without
+running the CLI.
 """
 
 from __future__ import annotations

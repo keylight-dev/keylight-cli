@@ -93,6 +93,22 @@ jobs:
         run: |
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/keylight${{ matrix.ext }}" "dist/keylight-${{ matrix.target }}${{ matrix.ext }}"
+      # Shell completions and the man page are platform-independent, so generate
+      # them once — on the Linux leg, from the binary just built (it runs
+      # natively on the ubuntu runner) — and attach them to the same release.
+      # The Homebrew formula regenerates completions from the installed binary,
+      # but shipping them as assets lets manual and distro installs pick them up
+      # without running the CLI themselves.
+      - name: Generate completions and man page
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/keylight"
+          "$bin" man > dist/keylight.1
+          "$bin" completions bash       > dist/keylight.bash
+          "$bin" completions zsh        > dist/_keylight
+          "$bin" completions fish       > dist/keylight.fish
+          "$bin" completions powershell > dist/keylight.ps1
       - name: Extract changelog notes for this tag
         shell: bash
         run: |
@@ -108,6 +124,19 @@ jobs:
         with:
           files: "dist/keylight-${{ matrix.target }}*"
           body_path: RELEASE_NOTES.md
+      # The completion scripts and man page (Linux leg only) go on the same
+      # release. A second action-gh-release call for the same tag adds files to
+      # the existing release rather than replacing it.
+      - name: Attach completions and man page
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/keylight.1
+            dist/keylight.bash
+            dist/_keylight
+            dist/keylight.fish
+            dist/keylight.ps1
 
   # Repoint keylight-dev/homebrew-tap at this release. Runs after `binaries`
   # because it checksums the assets that job uploads.
