@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod branding;
 pub mod customers;
 pub mod init;
 pub mod integrations;

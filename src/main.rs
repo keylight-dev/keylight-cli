@@ -83,6 +83,11 @@ enum Command {
         #[command(subcommand)]
         command: commands::customers::CustomersCommand,
     },
+    /// Read or update your customer-facing business identity.
+    Branding {
+        #[command(subcommand)]
+        command: commands::branding::BrandingCommand,
+    },
     /// Manage payment-provider integrations.
     Integrations {
         #[command(subcommand)]
@@ -226,6 +231,7 @@ fn main() {
             AuthCommand::Status => commands::auth::status(&ctx, &deps),
         },
         Command::Customers { command } => commands::customers::run(&ctx, &deps, command),
+        Command::Branding { command } => commands::branding::run(&ctx, &deps, command),
         Command::Integrations { command } => commands::integrations::run(&ctx, &deps, command),
         Command::Licenses { command } => commands::licenses::run(&ctx, &deps, command),
         Command::Products { command } => commands::products::run(&ctx, &deps, command),
