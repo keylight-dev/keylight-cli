@@ -11,6 +11,9 @@
 
 /// `(method, path, command)` for every endpoint a command reaches.
 pub const COVERED: &[(&str, &str, &str)] = &[
+    // customer branding
+    ("GET", "/v1/branding", "branding get"),
+    ("PATCH", "/v1/branding", "branding set"),
     // auth
     ("POST", "/v1/login/device", "login"),
     ("POST", "/v1/login/device/token", "login"),
@@ -152,6 +155,11 @@ pub const NOT_COMMANDS: &[(&str, &str, &str)] = &[
 ///
 /// Kept as an explicit list so the coverage test still fails on a *new*
 /// endpoint appearing in the spec rather than silently absorbing it, and so
-/// remaining work is counted in the test output. Now empty: every endpoint
-/// the management API exposes is reachable from a command.
-pub const PENDING: &[(&str, &str, &str)] = &[];
+/// remaining work is counted in the test output.
+pub const PENDING: &[(&str, &str, &str)] = &[
+    ("POST", "/v1/branding/logo", "branding set logo upload (multipart transport support)"),
+    ("DELETE", "/v1/branding/logo", "branding logo remove (PATCH branding set clears the reference)"),
+    ("POST", "/v1/licenses/activate", "runtime activate"),
+    ("POST", "/v1/licenses/deactivate", "runtime deactivate"),
+    ("POST", "/v1/licenses/validate", "runtime validate"),
+];
