@@ -187,6 +187,7 @@ mod tests {
             sleeper: Arc::new(NoopSleeper::default()),
             opener: &opener,
             max_polls: Some(5),
+            notice: Default::default(),
         };
         let ctx = login_ctx(no_browser, is_tty);
         login(&ctx, &deps, Some(vec!["usage:read".into()])).unwrap();

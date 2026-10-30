@@ -197,6 +197,7 @@ mod tests {
             sleeper: Arc::new(NoopSleeper::default()),
             opener,
             max_polls: Some(5),
+            notice: Default::default(),
         }
     }
 

@@ -75,15 +75,46 @@ fn print_notice(notice: &str) {
     eprintln!("warning: {notice}");
 }
 
+/// The server's `Keylight-Notice`, shown at most once per command. One is made
+/// per command invocation (on [`crate::commands::Deps`]) and shared by every
+/// client that command builds — a command may build several (setup, the
+/// step-up retry) and each would otherwise print it again.
+pub struct NoticeOnce {
+    shown: AtomicBool,
+    /// Where the notice goes. Stderr in production, so a notice never lands
+    /// in `--json` or CSV on stdout.
+    sink: Box<dyn Fn(&str) + Send + Sync>,
+}
+
+impl Default for NoticeOnce {
+    fn default() -> Self {
+        Self::with_sink(print_notice)
+    }
+}
+
+impl NoticeOnce {
+    pub fn with_sink(sink: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        Self {
+            shown: AtomicBool::new(false),
+            sink: Box::new(sink),
+        }
+    }
+
+    fn show(&self, notice: Option<&str>) {
+        if let Some(n) = notice
+            && !self.shown.swap(true, Ordering::Relaxed)
+        {
+            (self.sink)(n);
+        }
+    }
+}
+
 pub struct ApiClient {
     transport: Arc<dyn Transport>,
     sleeper: Arc<dyn Sleeper>,
     base_url: String,
     token: Option<String>,
-    /// Where the account notice goes. Stderr in production, so a notice never
-    /// lands in `--json` or CSV on stdout.
-    notice_sink: Box<dyn Fn(&str) + Send + Sync>,
-    notice_shown: AtomicBool,
+    notice: Arc<NoticeOnce>,
 }
 
 impl ApiClient {
@@ -98,8 +129,7 @@ impl ApiClient {
             sleeper,
             base_url: base_url.into(),
             token: Some(token.into()),
-            notice_sink: Box::new(print_notice),
-            notice_shown: AtomicBool::new(false),
+            notice: Arc::new(NoticeOnce::default()),
         }
     }
 
@@ -117,19 +147,16 @@ impl ApiClient {
             sleeper,
             base_url: base_url.into(),
             token: None,
-            notice_sink: Box::new(print_notice),
-            notice_shown: AtomicBool::new(false),
+            notice: Arc::new(NoticeOnce::default()),
         }
     }
 
-    /// Show the server's `Keylight-Notice` at most once for this client (one
-    /// per command), however many requests the command makes.
-    fn show_notice(&self, notice: Option<&str>) {
-        if let Some(n) = notice
-            && !self.notice_shown.swap(true, Ordering::Relaxed)
-        {
-            (self.notice_sink)(n);
-        }
+    /// Share the command's notice state, so the notice shows once per command
+    /// however many clients and requests the command makes. A client built
+    /// without this shows it once for itself.
+    pub fn sharing_notice(mut self, notice: Arc<NoticeOnce>) -> Self {
+        self.notice = notice;
+        self
     }
 
     fn url(&self, path: &str) -> String {
@@ -246,7 +273,7 @@ impl ApiClient {
         attempt: u32,
     ) -> Result<Settled> {
         if let TransportOutcome::Response(r) = &outcome {
-            self.show_notice(r.notice.as_deref());
+            self.notice.show(r.notice.as_deref());
         }
         match outcome {
             TransportOutcome::Response(r) if r.status == 202 => {
@@ -312,8 +339,9 @@ mod tests {
     ) -> (ApiClient, Arc<std::sync::Mutex<Vec<String>>>) {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = seen.clone();
-        let mut c = client(transport);
-        c.notice_sink = Box::new(move |n| sink.lock().unwrap().push(n.to_string()));
+        let c = client(transport).sharing_notice(Arc::new(NoticeOnce::with_sink(move |n| {
+            sink.lock().unwrap().push(n.to_string())
+        })));
         (c, seen)
     }
 
