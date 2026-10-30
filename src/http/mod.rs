@@ -12,6 +12,8 @@ pub struct HttpResponse {
     pub status: u16,
     pub body: String,
     pub retry_after: Option<u64>,
+    /// Value of the `Keylight-Notice` response header, when the server sent one.
+    pub notice: Option<String>,
 }
 
 /// Outcome of a transport attempt: an HTTP response, or a transient/terminal

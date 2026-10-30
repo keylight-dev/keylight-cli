@@ -10,6 +10,10 @@ against.
 
 ## [Unreleased]
 
+### Added
+- Shows a notice on stderr when two-step sign-in will soon be required on your
+  Keylight account, at most once per command. `--json` output is unaffected.
+
 ## [0.2.2] - 2026-08-14
 
 ### Added
