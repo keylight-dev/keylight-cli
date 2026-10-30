@@ -414,7 +414,8 @@ fn verify_api(
         deps.sleeper.clone(),
         ctx.api_url.clone(),
         runtime_token,
-    );
+    )
+    .sharing_notice(deps.notice.clone());
 
     let proof = run_api_proof(&runtime, &product_id, &check.license_key, &device_id);
 

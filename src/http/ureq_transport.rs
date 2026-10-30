@@ -22,11 +22,16 @@ fn parse_response(resp: ureq::Response) -> TransportOutcome {
     let retry_after = resp
         .header("Retry-After")
         .and_then(|h| h.parse::<u64>().ok());
+    let notice = resp
+        .header("Keylight-Notice")
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty());
     let body = resp.into_string().unwrap_or_default();
     TransportOutcome::Response(HttpResponse {
         status,
         body,
         retry_after,
+        notice,
     })
 }
 

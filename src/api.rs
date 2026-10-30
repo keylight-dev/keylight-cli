@@ -11,6 +11,7 @@ use crate::http::{Transport, TransportOutcome};
 use crate::sleep::Sleeper;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Header the server expects on the retried call once a confirmation has
@@ -70,11 +71,50 @@ enum Settled {
     Pending(PendingConfirmation),
 }
 
+fn print_notice(notice: &str) {
+    eprintln!("warning: {notice}");
+}
+
+/// The server's `Keylight-Notice`, shown at most once per command. One is made
+/// per command invocation (on [`crate::commands::Deps`]) and shared by every
+/// client that command builds — a command may build several (setup, the
+/// step-up retry) and each would otherwise print it again.
+pub struct NoticeOnce {
+    shown: AtomicBool,
+    /// Where the notice goes. Stderr in production, so a notice never lands
+    /// in `--json` or CSV on stdout.
+    sink: Box<dyn Fn(&str) + Send + Sync>,
+}
+
+impl Default for NoticeOnce {
+    fn default() -> Self {
+        Self::with_sink(print_notice)
+    }
+}
+
+impl NoticeOnce {
+    pub fn with_sink(sink: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        Self {
+            shown: AtomicBool::new(false),
+            sink: Box::new(sink),
+        }
+    }
+
+    fn show(&self, notice: Option<&str>) {
+        if let Some(n) = notice
+            && !self.shown.swap(true, Ordering::Relaxed)
+        {
+            (self.sink)(n);
+        }
+    }
+}
+
 pub struct ApiClient {
     transport: Arc<dyn Transport>,
     sleeper: Arc<dyn Sleeper>,
     base_url: String,
     token: Option<String>,
+    notice: Arc<NoticeOnce>,
 }
 
 impl ApiClient {
@@ -89,6 +129,7 @@ impl ApiClient {
             sleeper,
             base_url: base_url.into(),
             token: Some(token.into()),
+            notice: Arc::new(NoticeOnce::default()),
         }
     }
 
@@ -106,7 +147,16 @@ impl ApiClient {
             sleeper,
             base_url: base_url.into(),
             token: None,
+            notice: Arc::new(NoticeOnce::default()),
         }
+    }
+
+    /// Share the command's notice state, so the notice shows once per command
+    /// however many clients and requests the command makes. A client built
+    /// without this shows it once for itself.
+    pub fn sharing_notice(mut self, notice: Arc<NoticeOnce>) -> Self {
+        self.notice = notice;
+        self
     }
 
     fn url(&self, path: &str) -> String {
@@ -222,6 +272,9 @@ impl ApiClient {
         body: Option<&str>,
         attempt: u32,
     ) -> Result<Settled> {
+        if let TransportOutcome::Response(r) = &outcome {
+            self.notice.show(r.notice.as_deref());
+        }
         match outcome {
             TransportOutcome::Response(r) if r.status == 202 => {
                 let env: ConfirmationEnvelope =
@@ -270,7 +323,7 @@ impl ApiClient {
 mod tests {
     use super::*;
     use crate::sleep::NoopSleeper;
-    use crate::test_support::{ScriptedTransport, resp};
+    use crate::test_support::{ScriptedTransport, resp, resp_with_notice};
 
     fn client(transport: Arc<ScriptedTransport>) -> ApiClient {
         ApiClient::new(
@@ -279,6 +332,67 @@ mod tests {
             "https://api.keylight.dev",
             "klm_test",
         )
+    }
+
+    fn client_with_sink(
+        transport: Arc<ScriptedTransport>,
+    ) -> (ApiClient, Arc<std::sync::Mutex<Vec<String>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let c = client(transport).sharing_notice(Arc::new(NoticeOnce::with_sink(move |n| {
+            sink.lock().unwrap().push(n.to_string())
+        })));
+        (c, seen)
+    }
+
+    const NOTICE: &str = "Two-step sign-in becomes required on this account on 2026-11-29. Set it up at app.keylight.dev.";
+
+    #[test]
+    fn notice_header_is_shown_once_across_several_requests() {
+        let t = Arc::new(ScriptedTransport::new(vec![
+            resp_with_notice(200, "{}", NOTICE),
+            resp_with_notice(200, "{}", NOTICE),
+        ]));
+        let (c, seen) = client_with_sink(t);
+        c.get("/v1/licenses").unwrap();
+        c.get("/v1/licenses").unwrap();
+        assert_eq!(seen.lock().unwrap().as_slice(), [NOTICE]);
+    }
+
+    #[test]
+    fn no_notice_header_prints_nothing() {
+        let t = Arc::new(ScriptedTransport::new(vec![resp(200, "{}", None)]));
+        let (c, seen) = client_with_sink(t);
+        c.get("/v1/licenses").unwrap();
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn notice_is_shown_even_when_the_response_is_an_error() {
+        let t = Arc::new(ScriptedTransport::new(vec![resp_with_notice(
+            404,
+            r#"{"error":"Not found"}"#,
+            NOTICE,
+        )]));
+        let (c, seen) = client_with_sink(t);
+        assert!(c.get("/v1/products/x").is_err());
+        assert_eq!(seen.lock().unwrap().as_slice(), [NOTICE]);
+    }
+
+    #[test]
+    fn two_step_required_403_message_is_kept_verbatim() {
+        let msg = "Two-step sign-in is required on this Keylight account. Set it up at app.keylight.dev, then run `keylight login` again.";
+        let body = serde_json::json!({ "error": msg }).to_string();
+        let t = Arc::new(ScriptedTransport::new(vec![resp(403, &body, None)]));
+        let err = client(t).get("/v1/licenses").unwrap_err();
+        assert!(err.to_string().contains(msg), "got: {err}");
+        match err {
+            CliError::Api { status, message } => {
+                assert_eq!(status, 403);
+                assert_eq!(message, msg);
+            }
+            other => panic!("expected Api error, got {other:?}"),
+        }
     }
 
     #[test]

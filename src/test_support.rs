@@ -51,5 +51,16 @@ pub fn resp(status: u16, body: &str, retry_after: Option<u64>) -> TransportOutco
         status,
         body: body.to_string(),
         retry_after,
+        notice: None,
+    })
+}
+
+/// As [`resp`], with a `Keylight-Notice` header.
+pub fn resp_with_notice(status: u16, body: &str, notice: &str) -> TransportOutcome {
+    TransportOutcome::Response(HttpResponse {
+        status,
+        body: body.to_string(),
+        retry_after: None,
+        notice: Some(notice.to_string()),
     })
 }

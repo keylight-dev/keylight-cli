@@ -10,7 +10,7 @@ pub mod products;
 pub mod setup;
 pub mod stepup;
 
-use crate::api::ApiClient;
+use crate::api::{ApiClient, NoticeOnce};
 use crate::config;
 use crate::confirmation::{
     ConfirmOptions, Opener, RealOpener, run_confirmable, run_confirmable_raw,
@@ -55,7 +55,8 @@ impl Context {
             deps.sleeper.clone(),
             self.api_url.clone(),
             token,
-        ))
+        )
+        .sharing_notice(deps.notice.clone()))
     }
 
     /// A client for the two endpoints that take no auth — the device-login
@@ -66,6 +67,7 @@ impl Context {
             deps.sleeper.clone(),
             self.api_url.clone(),
         )
+        .sharing_notice(deps.notice.clone())
     }
 }
 
@@ -84,6 +86,10 @@ pub struct Deps<'a> {
     /// Safety valve for the confirmation poll loop; `None` in production,
     /// where the server-side confirmation expires on its own.
     pub max_polls: Option<u32>,
+    /// The account notice, shown once for the whole command — shared by every
+    /// client the command builds. One `Deps` per invocation, never a static,
+    /// so parallel tests don't silence each other.
+    pub notice: Arc<NoticeOnce>,
 }
 
 impl Deps<'static> {
@@ -94,6 +100,7 @@ impl Deps<'static> {
             sleeper: Arc::new(RealSleeper),
             opener: &REAL_OPENER,
             max_polls: None,
+            notice: Arc::new(NoticeOnce::default()),
         }
     }
 }
@@ -340,6 +347,7 @@ pub mod testing {
             sleeper: Arc::new(NoopSleeper::default()),
             opener,
             max_polls: Some(10),
+            notice: Arc::new(NoticeOnce::default()),
         }
     }
 
@@ -507,6 +515,7 @@ mod run_gated_tests {
             sleeper: Arc::new(NoopSleeper::default()),
             opener: &OPENER,
             max_polls: Some(10),
+            notice: Arc::new(NoticeOnce::default()),
         };
         let ctx = ctx_with_token();
         let client = ctx.client(&deps).unwrap();
@@ -543,6 +552,7 @@ mod run_gated_tests {
             sleeper: Arc::new(NoopSleeper::default()),
             opener: &OPENER,
             max_polls: Some(10),
+            notice: Arc::new(NoticeOnce::default()),
         };
         let ctx = ctx_with_token();
         let client = ctx.client(&deps).unwrap();
@@ -556,6 +566,59 @@ mod run_gated_tests {
         // Only the one call was made — no verify/device-start followed.
         assert_eq!(transport.requests.lock().unwrap().len(), 1);
 
+        let _ = config::delete_config(&ctx.config_path);
+    }
+
+    const NOTICE: &str = "Two-step sign-in becomes required on this account on 2026-11-29. Set it up at app.keylight.dev.";
+
+    /// Deps whose notice lands in the returned list instead of on stderr.
+    fn deps_with_notice_sink(
+        transport: Arc<ScriptedTransport>,
+    ) -> (Deps<'static>, Arc<std::sync::Mutex<Vec<String>>>) {
+        static OPENER: NoopOpener = NoopOpener;
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = seen.clone();
+        let deps = Deps {
+            transport,
+            sleeper: Arc::new(NoopSleeper::default()),
+            opener: &OPENER,
+            max_polls: Some(10),
+            notice: Arc::new(NoticeOnce::with_sink(move |n| {
+                sink.lock().unwrap().push(n.to_string())
+            })),
+        };
+        (deps, seen)
+    }
+
+    // A command that builds several clients (setup, the step-up retry) still
+    // shows the account notice once: the clients share the command's Deps.
+    #[test]
+    fn notice_shows_once_across_every_client_a_command_builds() {
+        use crate::test_support::resp_with_notice;
+        let (deps, seen) = deps_with_notice_sink(Arc::new(ScriptedTransport::new(vec![
+            resp_with_notice(200, "{}", NOTICE),
+            resp_with_notice(200, "{}", NOTICE),
+        ])));
+        let ctx = ctx_with_token();
+
+        ctx.client(&deps).unwrap().get("/v1/products").unwrap();
+        assert_eq!(seen.lock().unwrap().as_slice(), [NOTICE]);
+        ctx.client(&deps).unwrap().get("/v1/licenses").unwrap();
+        assert_eq!(seen.lock().unwrap().as_slice(), [NOTICE]);
+
+        let _ = config::delete_config(&ctx.config_path);
+    }
+
+    #[test]
+    fn the_anonymous_client_shares_the_command_notice_too() {
+        use crate::test_support::resp_with_notice;
+        let (deps, seen) =
+            deps_with_notice_sink(Arc::new(ScriptedTransport::new(vec![resp_with_notice(
+                200, "{}", NOTICE,
+            )])));
+        let ctx = ctx_with_token();
+        ctx.anonymous_client(&deps).get("/v1/x").unwrap();
+        assert_eq!(seen.lock().unwrap().as_slice(), [NOTICE]);
         let _ = config::delete_config(&ctx.config_path);
     }
 }
