@@ -169,7 +169,8 @@ keylight products create --display-name "My App" --key-prefix MYAP --support-ema
 keylight products create --display-name "My API App" --key-prefix MYAP \
   --support-email help@myapp.com --integration-mode api
 keylight products update my-app --purchase-url https://myapp.com/buy
-keylight products free-tier set my-app --enabled
+keylight products free-tier set my-app --enabled   # needs browser approval
+keylight products trial set my-app --days 14       # needs browser approval; 0 turns trials off
 keylight products test-mode disable my-app
 ```
 
@@ -199,7 +200,23 @@ keylight products key-types create --product my-app \
 keylight products key-types update pro --product my-app --activation-limit 5
 keylight products key-types delete pro --product my-app     # needs browser approval
 keylight products key-types verify-prices --product my-app
+keylight products key-types update pro --product my-app --per-seat    # needs browser approval
+keylight products key-types set-price pro --product my-app \
+  --price-in-cents 900 --currency usd                       # needs browser approval
 ```
+
+`--per-seat` is the dashboard's "Sell in multiples" (Per seat): buyers choose a quantity at
+checkout. It works on `create` and `update`; `--no-per-seat` on `update` turns it off. A `create`
+or `update` without these flags needs no approval.
+
+`--price-in-cents` is the amount in the currency's smallest unit (900 is 9.00 USD), minimum 50.
+`set-price` is the same operation as Save prices on the dashboard: it creates or replaces the
+Stripe price and turns Stripe on for the app, so a Stripe account must already be connected
+(`keylight integrations connect stripe`).
+
+To turn Stripe on or off for an app without pricing a key type, use
+`keylight products integrations set my-app stripe --enabled` (or `--disabled`, which archives the
+app's Stripe prices). Both need browser approval.
 
 `--duration-days 0` means **perpetual**. Any other number is a real expiry in days.
 
@@ -351,9 +368,11 @@ one, the CLI:
 2. Polls until you approve or deny it, or it expires after 10 minutes.
 3. Retries the original call automatically once approved.
 
-Seven operations are gated: `licenses revoke`, `licenses export`, `products key-types delete`,
-`integrations rotate-secret`, `sdk-key get`, `sdk-key rotate`, and `webhook set`. You never have
-to know which — the CLI walks the flow whenever the server asks.
+The gated operations are `licenses revoke`, `licenses export`, `products key-types delete`,
+`integrations rotate-secret`, `sdk-key get`, `sdk-key rotate`, `webhook set`, `products free-tier
+set`, `products trial set`, `products key-types set-price`, `products key-types create` and
+`update` with `--per-seat` or `--no-per-seat`, and `products integrations set` for `stripe`. You
+never have to know which — the CLI walks the flow whenever the server asks.
 
 These block and wait by design. They are human-gated operations, and failing fast for unattended
 callers would misrepresent what they are; an agent can surface the URL to its user.

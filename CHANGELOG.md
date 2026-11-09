@@ -10,6 +10,26 @@ against.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-11-09
+
+### Added
+- `keylight products trial set <app> --days N`: set an app's trial length, 0 to
+  365 (0 turns trials off). Needs browser approval.
+- `keylight products key-types set-price <key-type> --product <app>
+  --price-in-cents N --currency C`: set a key type's price. Creates or replaces
+  the Stripe price and turns Stripe on for the app, the same operation as Save
+  prices on the dashboard. Needs browser approval.
+- `--per-seat` on `products key-types create`, and `--per-seat` / `--no-per-seat`
+  on `products key-types update`, for the dashboard's "Sell in multiples" setting.
+  Needs browser approval; a create or update without these flags does not.
+- `keylight products integrations set <app> stripe --enabled` (or `--disabled`)
+  turns Stripe on or off for an app. Needs browser approval.
+
+### Changed
+- `keylight products free-tier set` now needs browser approval.
+- These need a server release that has the new routes, so update the CLI after
+  it has shipped.
+
 ## [0.2.3] - 2026-10-30
 
 ### Added

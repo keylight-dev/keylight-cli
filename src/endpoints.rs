@@ -28,6 +28,11 @@ pub const COVERED: &[(&str, &str, &str)] = &[
     ),
     (
         "POST",
+        "/v1/products/{productId}/trial-duration",
+        "products trial set",
+    ),
+    (
+        "POST",
         "/v1/products/{productId}/test-mode",
         "products test-mode enable",
     ),
@@ -61,6 +66,11 @@ pub const COVERED: &[(&str, &str, &str)] = &[
         "DELETE",
         "/v1/products/{productId}/key-types/{keyTypeId}",
         "products key-types delete",
+    ),
+    (
+        "POST",
+        "/v1/products/{productId}/key-types/{keyTypeId}/price",
+        "products key-types set-price",
     ),
     (
         "POST",

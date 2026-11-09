@@ -36,6 +36,10 @@ pub enum KeyTypesCommand {
         /// Entitlement to grant; repeat for several.
         #[arg(long = "entitlement")]
         entitlements: Option<Vec<String>>,
+        /// Sell in multiples (shown as Per seat): buyers choose a quantity at
+        /// checkout. Needs approval in your browser.
+        #[arg(long)]
+        per_seat: bool,
     },
     /// Change a key type.
     Update {
@@ -52,6 +56,29 @@ pub enum KeyTypesCommand {
         duration_days: Option<u32>,
         #[arg(long = "entitlement")]
         entitlements: Option<Vec<String>>,
+        /// Turn on Sell in multiples (shown as Per seat). Needs approval in
+        /// your browser.
+        #[arg(long, conflicts_with = "no_per_seat")]
+        per_seat: bool,
+        /// Turn off Sell in multiples. Needs approval in your browser.
+        #[arg(long)]
+        no_per_seat: bool,
+    },
+    /// Set a key type's price. Needs approval in your browser.
+    ///
+    /// Creates or replaces the Stripe price, and turns Stripe on for the app.
+    SetPrice {
+        /// The key type to price.
+        key_type_id: String,
+        #[arg(long)]
+        product: String,
+        /// Price in the currency's smallest unit, e.g. 900 for 9.00 USD.
+        /// Minimum 50.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(50..=99_999_999))]
+        price_in_cents: u32,
+        /// ISO 4217 currency code, e.g. usd.
+        #[arg(long)]
+        currency: String,
     },
     /// Delete a key type. Needs approval in your browser.
     Delete {
@@ -87,6 +114,7 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: KeyTypesCommand) -> Result<()> {
             activation_limit,
             duration_days,
             entitlements,
+            per_seat,
         } => {
             let body = json_body(vec![
                 ("keyTypeId", key_type_id.map(Into::into)),
@@ -94,6 +122,7 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: KeyTypesCommand) -> Result<()> {
                 ("activationLimit", activation_limit.map(Into::into)),
                 ("durationDays", duration_value(duration_days)),
                 ("entitlements", entitlements.map(Into::into)),
+                ("scalesWithQuantity", per_seat.then_some(true.into())),
             ]);
             write(
                 ctx,
@@ -110,17 +139,28 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: KeyTypesCommand) -> Result<()> {
             activation_limit,
             duration_days,
             entitlements,
+            per_seat,
+            no_per_seat,
         } => {
+            // Neither flag leaves the setting out of the request: sending it is
+            // what makes the server ask for approval.
+            let scales = match (per_seat, no_per_seat) {
+                (true, _) => Some(true.into()),
+                (false, true) => Some(false.into()),
+                (false, false) => None,
+            };
             let body = json_body(vec![
                 ("displayName", display_name.map(Into::into)),
                 ("activationLimit", activation_limit.map(Into::into)),
                 ("durationDays", duration_value(duration_days)),
                 ("entitlements", entitlements.map(Into::into)),
+                ("scalesWithQuantity", scales),
             ]);
             if body.as_object().map(|o| o.is_empty()).unwrap_or(true) {
                 return Err(CliError::Config(
                     "nothing to update; pass at least one of --display-name, \
-                     --activation-limit, --duration-days, --entitlement"
+                     --activation-limit, --duration-days, --entitlement, \
+                     --per-seat, --no-per-seat"
                         .into(),
                 ));
             }
@@ -131,6 +171,37 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: KeyTypesCommand) -> Result<()> {
                 &format!("/v1/products/{product}/key-types/{key_type_id}"),
                 Some(body),
             )
+        }
+        KeyTypesCommand::SetPrice {
+            key_type_id,
+            product,
+            price_in_cents,
+            currency,
+        } => {
+            let client = ctx.client(deps)?;
+            let body = serde_json::json!({
+                "priceInCents": price_in_cents,
+                "currency": currency,
+            });
+            let value = run_gated(
+                ctx,
+                deps,
+                &client,
+                "POST",
+                &format!("/v1/products/{product}/key-types/{key_type_id}/price"),
+                Some(&body),
+            )?;
+            emit(ctx.json, &value, |v| {
+                let k = key_type_payload(v);
+                output::kv(&[
+                    ("ID", output::cell(k.get("keyTypeId"))),
+                    ("Price in cents", output::cell(k.get("priceInCents"))),
+                    ("Currency", output::cell(k.get("priceCurrency"))),
+                    ("Stripe price", output::cell(k.get("stripePriceId"))),
+                    ("Stripe on", output::cell(v.get("stripeConnectEnabled"))),
+                ]);
+            });
+            Ok(())
         }
         KeyTypesCommand::Delete {
             key_type_id,
@@ -258,7 +329,7 @@ fn write(
     // the human sees the new state and an agent avoids a second call.
     emit(ctx.json, &value, |v| {
         let k = key_type_payload(v);
-        output::kv(&[
+        let mut rows = vec![
             ("ID", output::cell(k.get("keyTypeId"))),
             ("Name", output::cell(k.get("displayName"))),
             ("Devices", output::cell(k.get("activationLimit"))),
@@ -270,7 +341,13 @@ fn write(
                 },
             ),
             ("Entitlements", output::cell(k.get("entitlements"))),
-        ]);
+        ];
+        // Only when the server reports it: a write that never touched this
+        // setting should print the same rows it always has.
+        if let Some(scales) = k.get("scalesWithQuantity") {
+            rows.push(("Per seat", output::cell(Some(scales))));
+        }
+        output::kv(&rows);
     });
     Ok(())
 }
@@ -364,6 +441,7 @@ mod tests {
                 activation_limit: Some(3),
                 duration_days: Some(0),
                 entitlements: Some(vec!["sync".into()]),
+                per_seat: false,
             },
         );
 
@@ -380,6 +458,11 @@ mod tests {
              would mint a key type that expires the instant it is issued"
         );
         assert_eq!(sent["entitlements"], serde_json::json!(["sync"]));
+        assert!(
+            !sent.as_object().unwrap().contains_key("scalesWithQuantity"),
+            "an unset --per-seat must stay out of the body: sending it is what \
+             triggers the approval step"
+        );
     }
 
     #[test]
@@ -394,6 +477,8 @@ mod tests {
                 activation_limit: None,
                 duration_days: None,
                 entitlements: None,
+                per_seat: false,
+                no_per_seat: false,
             },
         );
 
@@ -424,6 +509,8 @@ mod tests {
                 activation_limit: None,
                 duration_days: None,
                 entitlements: None,
+                per_seat: false,
+                no_per_seat: false,
             },
         )
         .unwrap_err();
@@ -471,6 +558,217 @@ mod tests {
                 .iter()
                 .any(|(k, v)| k == crate::api::CONFIRMATION_HEADER && v == "conf1"),
             "the retry must carry the confirmation id"
+        );
+    }
+
+    const PENDING: &str = r#"{"confirmation":{"id":"conf1","status":"pending","approveUrl":"https://app.keylight.dev/c/conf1","expiresInSeconds":600}}"#;
+
+    /// A pending confirmation, one approved poll, then the retried call.
+    fn approved_flow(
+        final_status: u16,
+        final_body: &'static str,
+    ) -> Vec<crate::http::TransportOutcome> {
+        vec![
+            resp(202, PENDING, None),
+            resp(200, r#"{"status":"approved"}"#, Some(0)),
+            resp(final_status, final_body, None),
+        ]
+    }
+
+    fn assert_retried_with_confirmation(
+        t: &std::sync::Arc<crate::test_support::ScriptedTransport>,
+        path_suffix: &str,
+    ) {
+        let reqs = t.requests.lock().unwrap();
+        assert_eq!(reqs.len(), 3, "initial call, one poll, then the retry");
+        assert!(
+            reqs[1].1.contains("/v1/confirmations/conf1"),
+            "got {}",
+            reqs[1].1
+        );
+        assert!(reqs[2].1.ends_with(path_suffix), "got {}", reqs[2].1);
+        assert!(
+            reqs[2]
+                .2
+                .iter()
+                .any(|(k, v)| k == crate::api::CONFIRMATION_HEADER && v == "conf1"),
+            "the retry must carry the confirmation id"
+        );
+    }
+
+    #[test]
+    fn set_price_posts_the_price_and_walks_the_confirmation_flow() {
+        let t = transport(approved_flow(
+            200,
+            r#"{"updated":{"keyTypeId":"pro"},"stripeConnectEnabled":true}"#,
+        ));
+        run_cmd(
+            &t,
+            KeyTypesCommand::SetPrice {
+                key_type_id: "pro".into(),
+                product: "my-app".into(),
+                price_in_cents: 900,
+                currency: "usd".into(),
+            },
+        );
+
+        let (method, url, body) = request_at(&t, 0);
+        assert_eq!(method, "POST");
+        assert!(
+            url.ends_with("/v1/products/my-app/key-types/pro/price"),
+            "got {url}"
+        );
+        let sent: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        assert_eq!(
+            sent,
+            serde_json::json!({"priceInCents": 900, "currency": "usd"})
+        );
+        assert_retried_with_confirmation(&t, "/v1/products/my-app/key-types/pro/price");
+    }
+
+    #[test]
+    fn create_with_per_seat_sends_true_and_walks_the_confirmation_flow() {
+        let t = transport(approved_flow(201, r#"{"created":{"keyTypeId":"seats"}}"#));
+        run_cmd(
+            &t,
+            KeyTypesCommand::Create {
+                product: "my-app".into(),
+                key_type_id: Some("seats".into()),
+                display_name: Some("Seats".into()),
+                activation_limit: Some(2),
+                duration_days: None,
+                entitlements: None,
+                per_seat: true,
+            },
+        );
+        let (_, _, body) = request_at(&t, 0);
+        let sent: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        assert_eq!(sent["scalesWithQuantity"], true);
+        assert_retried_with_confirmation(&t, "/v1/products/my-app/key-types");
+    }
+
+    #[test]
+    fn update_can_turn_per_seat_on_and_off() {
+        for (flag_on, expected) in [(true, true), (false, false)] {
+            let t = transport(approved_flow(200, r#"{"updated":{"keyTypeId":"pro"}}"#));
+            run_cmd(
+                &t,
+                KeyTypesCommand::Update {
+                    key_type_id: "pro".into(),
+                    product: "my-app".into(),
+                    display_name: None,
+                    activation_limit: None,
+                    duration_days: None,
+                    entitlements: None,
+                    per_seat: flag_on,
+                    no_per_seat: !flag_on,
+                },
+            );
+            let (method, url, body) = request_at(&t, 0);
+            assert_eq!(method, "PATCH");
+            assert!(
+                url.ends_with("/v1/products/my-app/key-types/pro"),
+                "got {url}"
+            );
+            let sent: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            assert_eq!(sent, serde_json::json!({ "scalesWithQuantity": expected }));
+            assert_retried_with_confirmation(&t, "/v1/products/my-app/key-types/pro");
+        }
+    }
+
+    /// Only --per-seat changes what is sent, so a per-seat flag on its own is
+    /// enough to get past the "nothing to update" guard.
+    #[test]
+    fn a_per_seat_only_update_is_not_rejected_as_empty() {
+        let t = transport(vec![resp(200, r#"{"updated":{"keyTypeId":"pro"}}"#, None)]);
+        run_cmd(
+            &t,
+            KeyTypesCommand::Update {
+                key_type_id: "pro".into(),
+                product: "my-app".into(),
+                display_name: None,
+                activation_limit: None,
+                duration_days: None,
+                entitlements: None,
+                per_seat: true,
+                no_per_seat: false,
+            },
+        );
+        assert_eq!(t.requests.lock().unwrap().len(), 1);
+    }
+
+    /// An agent's `--no-browser` run must not pop a browser, and a human at a
+    /// terminal should get one, same as the other gated commands.
+    #[test]
+    fn set_price_opens_the_browser_only_at_a_tty_without_no_browser() {
+        for (no_browser, is_tty, opens) in [
+            (true, true, false),
+            (false, false, false),
+            (false, true, true),
+        ] {
+            let t = transport(approved_flow(
+                200,
+                r#"{"updated":{"keyTypeId":"pro"},"stripeConnectEnabled":true}"#,
+            ));
+            let o = RecordingOpener::new();
+            let d = deps(&t, &o);
+            let mut c = ctx(true);
+            c.no_browser = no_browser;
+            c.is_tty = is_tty;
+            run(
+                &c,
+                &d,
+                KeyTypesCommand::SetPrice {
+                    key_type_id: "pro".into(),
+                    product: "my-app".into(),
+                    price_in_cents: 900,
+                    currency: "usd".into(),
+                },
+            )
+            .unwrap();
+            cleanup(&c);
+            let opened = o.opened.lock().unwrap();
+            assert_eq!(
+                !opened.is_empty(),
+                opens,
+                "no_browser={no_browser} tty={is_tty}"
+            );
+            if opens {
+                assert_eq!(opened.as_slice(), ["https://app.keylight.dev/c/conf1"]);
+            }
+        }
+    }
+
+    /// A denied approval must surface as an error, not a success line.
+    #[test]
+    fn set_price_reports_a_denied_confirmation() {
+        let t = transport(vec![
+            resp(202, PENDING, None),
+            resp(200, r#"{"status":"denied"}"#, Some(0)),
+        ]);
+        let o = RecordingOpener::new();
+        let d = deps(&t, &o);
+        let c = ctx(true);
+        let err = run(
+            &c,
+            &d,
+            KeyTypesCommand::SetPrice {
+                key_type_id: "pro".into(),
+                product: "my-app".into(),
+                price_in_cents: 900,
+                currency: "usd".into(),
+            },
+        )
+        .unwrap_err();
+        cleanup(&c);
+        assert!(
+            matches!(err, CliError::ConfirmationNotApproved { .. }),
+            "got {err}"
+        );
+        assert_eq!(
+            t.requests.lock().unwrap().len(),
+            2,
+            "no retry after a denial"
         );
     }
 
