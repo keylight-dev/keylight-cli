@@ -202,3 +202,173 @@ fn env_token_is_used_without_ever_touching_the_config_file() {
     );
     assert!(find_config_toml(home.path()).is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Commercial settings: flag bounds are enforced before any network call, and
+// a gated command walks the whole confirmation flow against a local mock.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn trial_set_rejects_days_outside_0_to_365_locally() {
+    let home = tempfile::tempdir().unwrap();
+    for days in ["-1", "366"] {
+        let out = isolated_cmd(home.path())
+            .env("KEYLIGHT_API_TOKEN", "klm_test")
+            .env("KEYLIGHT_API_URL", "http://127.0.0.1:1")
+            .args(["products", "trial", "set", "my-app", "--days", days])
+            .assert()
+            .failure();
+        let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+        assert!(
+            stderr.contains("--days"),
+            "days={days} should fail at flag parsing, got: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn set_price_rejects_amounts_below_the_minimum_locally() {
+    let home = tempfile::tempdir().unwrap();
+    let out = isolated_cmd(home.path())
+        .env("KEYLIGHT_API_TOKEN", "klm_test")
+        .env("KEYLIGHT_API_URL", "http://127.0.0.1:1")
+        .args([
+            "products",
+            "key-types",
+            "set-price",
+            "pro",
+            "--product",
+            "my-app",
+            "--price-in-cents",
+            "49",
+            "--currency",
+            "usd",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("--price-in-cents"),
+        "should fail at flag parsing, got: {stderr}"
+    );
+}
+
+#[test]
+fn gated_commercial_commands_say_so_in_their_help() {
+    for args in [
+        vec!["products", "trial", "set", "--help"],
+        vec!["products", "free-tier", "set", "--help"],
+        vec!["products", "key-types", "set-price", "--help"],
+    ] {
+        let out = Command::cargo_bin("keylight")
+            .unwrap()
+            .args(&args)
+            .assert()
+            .success();
+        let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+        assert!(
+            stdout.contains("Needs approval in your browser"),
+            "{args:?} help should mention the approval step, got: {stdout}"
+        );
+    }
+}
+
+/// One scripted reply per connection, in order.
+fn serve_replies(
+    replies: Vec<(u16, &'static str)>,
+) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let handle = std::thread::spawn(move || {
+        let mut request_lines = Vec::new();
+        for (status, body) in replies {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                let lower = line.to_ascii_lowercase();
+                if let Some(v) = lower.strip_prefix("content-length:") {
+                    content_length = v.trim().parse().unwrap();
+                }
+            }
+            let mut sent_body = vec![0; content_length];
+            reader.read_exact(&mut sent_body).unwrap();
+            let mut stream = reader.into_inner();
+            write!(
+                stream,
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nRetry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            request_lines.push(format!(
+                "{} {}",
+                request_line.trim(),
+                String::from_utf8_lossy(&sent_body)
+            ));
+        }
+        request_lines
+    });
+    (base, handle)
+}
+
+/// The agent contract end to end: with `--json --no-browser`, stdout carries
+/// only the result, the approval URL goes to stderr, and the retried call is
+/// the original one.
+#[test]
+fn trial_set_json_mode_walks_the_flow_with_url_on_stderr_only() {
+    let home = tempfile::tempdir().unwrap();
+    let (base, server) = serve_replies(vec![
+        (
+            202,
+            r#"{"confirmation":{"id":"c1","status":"pending","approveUrl":"https://app.keylight.dev/c/c1","expiresInSeconds":600}}"#,
+        ),
+        (200, r#"{"id":"c1","status":"approved"}"#),
+        (
+            200,
+            r#"{"product":{"productId":"my-app","configuredTrialDurationDays":14}}"#,
+        ),
+    ]);
+    let out = isolated_cmd(home.path())
+        .env("KEYLIGHT_API_TOKEN", "klm_test")
+        .args([
+            "--json",
+            "--no-browser",
+            "--api-url",
+            &base,
+            "products",
+            "trial",
+            "set",
+            "my-app",
+            "--days",
+            "14",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("stdout must be only the JSON result: {e}\n{stdout}");
+    });
+    assert_eq!(parsed["product"]["configuredTrialDurationDays"], 14);
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("Approve it at: https://app.keylight.dev/c/c1"),
+        "got: {stderr}"
+    );
+
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].starts_with("POST /v1/products/my-app/trial-duration"));
+    assert!(requests[0].ends_with(r#"{"days":14}"#));
+    assert!(requests[1].starts_with("GET /v1/confirmations/c1"));
+    assert!(requests[2].starts_with("POST /v1/products/my-app/trial-duration"));
+}

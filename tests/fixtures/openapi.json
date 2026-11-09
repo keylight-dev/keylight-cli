@@ -169,6 +169,30 @@
         }
       }
     },
+    "/v1/products/{productId}/trial-duration": {
+      "parameters": [{ "$ref": "#/components/parameters/ProductId" }],
+      "post": {
+        "tags": ["Products"],
+        "summary": "Set trial length",
+        "description": "Sets the app's trial length in days (0 to 365). `0` means trials are off, which is different from never having set one. Confirm-gated. Requires the `danger` scope in addition to `products:write`. See the confirmation gate in the API description.",
+        "operationId": "setTrialDuration",
+        "x-required-scopes": ["products:write", "danger"],
+        "x-confirm-gated": true,
+        "parameters": [{ "$ref": "#/components/parameters/ConfirmationHeader" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["days"], "properties": { "days": { "type": "integer", "minimum": 0, "maximum": 365 } } } } } },
+        "responses": {
+          "200": { "description": "Trial length set.", "content": { "application/json": { "schema": { "type": "object", "required": ["product"], "properties": { "product": { "$ref": "#/components/schemas/Product" } } } } } },
+          "202": { "$ref": "#/components/responses/PendingConfirmation" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "422": { "$ref": "#/components/responses/Unprocessable" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
     "/v1/products/{productId}/test-mode": {
       "parameters": [ { "$ref": "#/components/parameters/ProductId" } ],
       "post": {
@@ -276,6 +300,32 @@
           "404": { "$ref": "#/components/responses/NotFound" },
           "405": { "$ref": "#/components/responses/MethodNotAllowed" },
           "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/v1/products/{productId}/key-types/{keyTypeId}/price": {
+      "parameters": [{ "$ref": "#/components/parameters/ProductId" }, { "$ref": "#/components/parameters/KeyTypeId" }],
+      "post": {
+        "tags": ["Key types"],
+        "summary": "Set key type price",
+        "description": "The same operation as Save prices on the dashboard's Stripe Connect card: creates or replaces the Stripe price on the app's connected account and turns on selling through Stripe Connect for the app. Other key types on the app are left as they are. Confirm-gated. Requires the `danger` scope in addition to `products:write`. See the confirmation gate in the API description.",
+        "operationId": "setKeyTypePrice",
+        "x-required-scopes": ["products:write", "danger"],
+        "x-confirm-gated": true,
+        "parameters": [{ "$ref": "#/components/parameters/ConfirmationHeader" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SetKeyTypePriceBody" } } } },
+        "responses": {
+          "200": { "description": "Price set.", "content": { "application/json": { "schema": { "type": "object", "required": ["updated", "stripeConnectEnabled"], "properties": { "updated": { "$ref": "#/components/schemas/KeyType" }, "stripeConnectEnabled": { "type": "boolean", "const": true } } } } } },
+          "202": { "$ref": "#/components/responses/PendingConfirmation" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/Unprocessable" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "502": { "description": "Stripe could not be updated. Nothing was saved.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
       }
     },
@@ -1341,6 +1391,14 @@
           "activationLimit": { "type": "number" },
           "durationDays": { "type": ["number", "null"] },
           "entitlements": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "SetKeyTypePriceBody": {
+        "type": "object",
+        "required": ["priceInCents", "currency"],
+        "properties": {
+          "priceInCents": { "type": "integer", "minimum": 50, "maximum": 99999999, "description": "Amount in the currency's smallest unit (900 is 9.00 USD)." },
+          "currency": { "type": "string", "pattern": "^[A-Za-z]{3}$", "description": "ISO 4217 code, e.g. `usd`." }
         }
       },
       "UpdateKeyTypeBody": {

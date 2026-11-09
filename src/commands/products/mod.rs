@@ -59,10 +59,15 @@ pub enum ProductsCommand {
         #[arg(long)]
         purchase_url: Option<String>,
     },
-    /// Turn the free tier on or off.
+    /// Turn the free tier on or off. Needs approval in your browser.
     FreeTier {
         #[command(subcommand)]
         command: FreeTierCommand,
+    },
+    /// Set the app's trial length. Needs approval in your browser.
+    Trial {
+        #[command(subcommand)]
+        command: TrialCommand,
     },
     /// Manage Stripe test mode.
     TestMode {
@@ -82,8 +87,19 @@ pub enum ProductsCommand {
 }
 
 #[derive(Subcommand)]
+pub enum TrialCommand {
+    /// Set the trial length. Needs approval in your browser.
+    Set {
+        product_id: String,
+        /// Trial length in days, 0 to 365. 0 turns trials off.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(0..=365))]
+        days: u32,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum FreeTierCommand {
-    /// Enable or disable the free tier.
+    /// Enable or disable the free tier. Needs approval in your browser.
     Set {
         product_id: String,
         /// Turn the free tier on.
@@ -118,6 +134,10 @@ pub enum TestModeCommand {
 #[derive(Subcommand)]
 pub enum ProductIntegrationsCommand {
     /// Enable/disable a provider for this app and map its prices.
+    ///
+    /// For `stripe`, only --enabled/--disabled apply, and it needs approval in
+    /// your browser. Set a Stripe price with `keylight products key-types
+    /// set-price`, which also turns Stripe on for the app.
     Set {
         product_id: String,
         /// Provider name, e.g. `stripe`, `paddle`, `lemonsqueezy`, `polar`.
@@ -167,6 +187,9 @@ pub fn run(ctx: &Context, deps: &Deps, cmd: ProductsCommand) -> Result<()> {
                 enabled,
                 disabled,
             } => free_tier(ctx, deps, &product_id, enabled, disabled),
+        },
+        ProductsCommand::Trial { command } => match command {
+            TrialCommand::Set { product_id, days } => trial_set(ctx, deps, &product_id, days),
         },
         ProductsCommand::TestMode { command } => match command {
             TestModeCommand::Enable {
@@ -326,6 +349,29 @@ fn free_tier(
             "Free tier {} for {product_id}.",
             if on { "enabled" } else { "disabled" }
         );
+        println!();
+        print_product(v);
+    });
+    Ok(())
+}
+
+fn trial_set(ctx: &Context, deps: &Deps, product_id: &str, days: u32) -> Result<()> {
+    let client = ctx.client(deps)?;
+    let body = serde_json::json!({ "days": days });
+    let value = run_gated(
+        ctx,
+        deps,
+        &client,
+        "POST",
+        &format!("/v1/products/{product_id}/trial-duration"),
+        Some(&body),
+    )?;
+    emit(ctx.json, &value, |v| {
+        if days == 0 {
+            println!("Trials turned off for {product_id}.");
+        } else {
+            println!("Trial length for {product_id} set to {days} days.");
+        }
         println!();
         print_product(v);
     });
@@ -587,6 +633,97 @@ mod tests {
             t.requests.lock().unwrap().is_empty(),
             "must not call the API when the intent is ambiguous"
         );
+    }
+
+    const PENDING: &str = r#"{"confirmation":{"id":"c1","status":"pending","approveUrl":"https://app.keylight.dev/c/c1","expiresInSeconds":600}}"#;
+
+    #[test]
+    fn free_tier_walks_the_confirmation_flow() {
+        let t = transport(vec![
+            resp(202, PENDING, None),
+            resp(200, r#"{"status":"approved"}"#, Some(0)),
+            resp(200, PRODUCT, None),
+        ]);
+        let o = RecordingOpener::new();
+        let d = deps(&t, &o);
+        let c = ctx(true);
+        free_tier(&c, &d, "my-app", false, true).unwrap();
+        cleanup(&c);
+
+        let reqs = t.requests.lock().unwrap();
+        assert_eq!(reqs.len(), 3);
+        assert!(reqs[2].1.ends_with("/v1/products/my-app/free-tier"));
+        assert_eq!(reqs[2].3.as_deref(), Some(r#"{"enabled":false}"#));
+        assert!(
+            reqs[2]
+                .2
+                .iter()
+                .any(|(k, v)| k == crate::api::CONFIRMATION_HEADER && v == "c1")
+        );
+    }
+
+    #[test]
+    fn trial_set_sends_days_and_walks_the_confirmation_flow() {
+        let t = transport(vec![
+            resp(202, PENDING, None),
+            resp(200, r#"{"status":"approved"}"#, Some(0)),
+            resp(200, PRODUCT, None),
+        ]);
+        let o = RecordingOpener::new();
+        let d = deps(&t, &o);
+        let c = ctx(true);
+        trial_set(&c, &d, "my-app", 1).unwrap();
+        cleanup(&c);
+
+        let (method, url, body) = request_at(&t, 0);
+        assert_eq!(method, "POST");
+        assert!(
+            url.ends_with("/v1/products/my-app/trial-duration"),
+            "got {url}"
+        );
+        assert_eq!(body.unwrap(), r#"{"days":1}"#);
+        let reqs = t.requests.lock().unwrap();
+        assert_eq!(reqs.len(), 3, "initial call, one poll, then the retry");
+        assert!(
+            reqs[2]
+                .2
+                .iter()
+                .any(|(k, v)| k == crate::api::CONFIRMATION_HEADER && v == "c1")
+        );
+    }
+
+    /// 0 means trials off and has to reach the server as 0, not be dropped.
+    #[test]
+    fn trial_set_sends_zero() {
+        let t = transport(vec![resp(200, PRODUCT, None)]);
+        let o = RecordingOpener::new();
+        let d = deps(&t, &o);
+        let c = ctx(true);
+        trial_set(&c, &d, "my-app", 0).unwrap();
+        cleanup(&c);
+        let (_, _, body) = request_at(&t, 0);
+        assert_eq!(body.unwrap(), r#"{"days":0}"#);
+    }
+
+    #[test]
+    fn stripe_integrations_set_sends_only_enabled() {
+        let t = transport(vec![resp(
+            200,
+            r#"{"productId":"my-app","provider":"stripe","enabled":true,"mappedPrices":1}"#,
+            None,
+        )]);
+        let o = RecordingOpener::new();
+        let d = deps(&t, &o);
+        let c = ctx(true);
+        integrations_set(&c, &d, "my-app", "stripe", true, false, None, None).unwrap();
+        cleanup(&c);
+        let (method, url, body) = request_at(&t, 0);
+        assert_eq!(method, "POST");
+        assert!(
+            url.ends_with("/v1/products/my-app/integrations/stripe"),
+            "got {url}"
+        );
+        assert_eq!(body.unwrap(), r#"{"enabled":true}"#);
     }
 
     /// Stripe secrets are read from the environment, never from argv — argv
